@@ -2,7 +2,9 @@
 Blender Procedural CobWeb with Tearing Solver
 
 Generator procedural cobwebs (radials, spiral, anchors) with pins, pre-written into the swf_pin attribute
+
 Solver custom verlet/PBD Simulation-Zone solver with gravity, wind + turbulence, collision, friction, and TEARING
+
 Strandify silk tubes with noisy radius, Fresnel silk material, optional dew droplets *dew has bug generating each frame
 
 QUICK START
