@@ -38,15 +38,20 @@ class SWF_WebProps(PropertyGroup):
                 "(Pixar / Thomas Kole construction)")],
         default='ORB')
     cobweb_initial: IntProperty(
-        name="Initial Lines", default=12, min=2, max=100,
+        name="Initial Lines", default=36, min=2, max=200,
         description="Anchor threads cast between the selected surfaces "
                     "before spinning starts")
     cobweb_spiders: IntProperty(
         name="Spiders", default=6, min=1, max=32,
         description="Concurrent spinners (Pixar used 5-10)")
     cobweb_steps: IntProperty(
-        name="Spin Steps", default=250, min=10, max=3000,
+        name="Spin Steps", default=600, min=10, max=3000,
         description="Total threads spun (Pixar used 50-1000)")
+    cobweb_spread: FloatProperty(
+        name="Spread", default=0.6, min=0.0, max=1.0,
+        description="0 = spiders knit dense local clumps, 1 = spinning "
+                    "distributes uniformly across the whole volume "
+                    "(spiders relocate often and take long bridging jumps)")
     cobweb_jump: FloatProperty(
         name="Jump Distance", default=0.4, min=0.01, max=10.0,
         subtype='DISTANCE',
@@ -384,7 +389,11 @@ def _build_cobweb(context, p, env_objs):
            and attempts < p.cobweb_initial * 40):
         attempts += 1
         a, na = _sample_surface(rnd, V, T, cum)
-        d = _rand_unit(rnd) + na * 1.2       # biased away from surface
+        d = _rand_unit(rnd)
+        if d.dot(na) < 0.0:
+            d = -d                            # keep in outward hemisphere
+        if rnd.random() < 0.5:
+            d = d + na * 1.2                  # half strongly normal-biased
         d = d / (np.linalg.norm(d) + 1e-12)
         hit = bvh.ray_cast(Vector(a + na * 1e-4), Vector(d), span)
         if hit[0] is None:
@@ -403,23 +412,36 @@ def _build_cobweb(context, p, env_objs):
         return None
 
     # ---- spiders spin threads ----
-    spiders = []
-    for _ in range(p.cobweb_spiders):
-        s = segs[rnd.randrange(len(segs))]
-        t = rnd.random()
-        spiders.append(add_vert(verts[s[0]] * (1 - t) + verts[s[1]] * t))
-        # place the spider ON the thread it starts from
-        b_idx = s[1]
-        segs.append([s[0], spiders[-1]])
-        s[0] = spiders[-1]
+    def spawn_on_thread():
+        """Split a random segment and return the new junction vertex —
+        keeps every spawn topologically attached to the web."""
+        k = rnd.randrange(len(segs))
+        ia, ib = segs[k]
+        t = rnd.uniform(0.15, 0.85)
+        ni = add_vert(verts[ia] * (1 - t) + verts[ib] * t)
+        segs[k] = [ia, ni]
+        segs.append([ni, ib])
+        return ni
 
+    spiders = [spawn_on_thread() for _ in range(p.cobweb_spiders)]
+
+    relocate_every = max(3, int(round(30.0 - 24.0 * p.cobweb_spread)))
+    long_jump_p = 0.08 + 0.32 * p.cobweb_spread
     for step in range(p.cobweb_steps):
         si = step % len(spiders)
+        # periodic relocation spreads spinning over the whole web instead
+        # of letting each spider random-walk a local clump
+        if step > 0 and (step // len(spiders)) % relocate_every == 0 \
+                and si == 0:
+            for sj in range(len(spiders)):
+                spiders[sj] = spawn_on_thread()
         pi = spiders[si]
         P = verts[pi]
         placed = False
         for _try in range(6):
-            Q = P + _rand_unit(rnd) * rnd.uniform(0.15, 1.0) * p.cobweb_jump
+            jump = p.cobweb_jump * (2.5 if rnd.random() < long_jump_p
+                                    else 1.0)
+            Q = P + _rand_unit(rnd) * rnd.uniform(0.15, 1.0) * jump
             # blocked by geometry -> land on the surface (new anchor)
             dvec = Q - P
             dist = np.linalg.norm(dvec)
@@ -462,11 +484,7 @@ def _build_cobweb(context, p, env_objs):
             placed = True
             break
         if not placed:
-            # stuck spider respawns on a random thread
-            s = segs[rnd.randrange(len(segs))]
-            t = rnd.random()
-            spiders[si] = add_vert(
-                verts[s[0]] * (1 - t) + verts[s[1]] * t)
+            spiders[si] = spawn_on_thread()  # stuck spider relocates
 
     # ---- to bmesh, with sag + detail subdivision ----
     bm = bmesh.new()

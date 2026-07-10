@@ -20,15 +20,16 @@ def _build_group():
 
     iface.new_socket(name="Geometry", in_out='INPUT',
                      socket_type='NodeSocketGeometry')
-    sock_in(iface, "Strand Radius",      'NodeSocketFloat', 0.0008,
+    sock_in(iface, "Strand Radius",      'NodeSocketFloat', 0.001,
             0.00005, 0.01)
     sock_in(iface, "Radius Variation",   'NodeSocketFloat', 0.4, 0.0, 1.0)
     sock_in(iface, "Profile Resolution", 'NodeSocketInt',   6, 3, 16)
+    sock_in(iface, "Smooth Segments",    'NodeSocketInt',   4, 1, 12)
     sock_in(iface, "Silk Material",      'NodeSocketMaterial')
     sock_in(iface, "Show Tension",       'NodeSocketBool',  False)
     sock_in(iface, "Tension Material",   'NodeSocketMaterial')
     sock_in(iface, "Enable Dew",         'NodeSocketBool',  True)
-    sock_in(iface, "Dew Spacing",        'NodeSocketFloat', 0.06, 0.005, 1.0)
+    sock_in(iface, "Dew Per Span",       'NodeSocketFloat', 0.3, 0.0, 3.0)
     sock_in(iface, "Dew Amount",         'NodeSocketFloat', 0.25, 0.0, 1.0)
     sock_in(iface, "Dew Size",           'NodeSocketFloat', 0.004,
             0.0005, 0.05)
@@ -42,8 +43,17 @@ def _build_group():
     g = gi.outputs
 
     # ---- strands -----------------------------------------------------------
-    m2c = h.n("GeometryNodeMeshToCurve", -900, 100)
+    m2c = h.n("GeometryNodeMeshToCurve", -950, 100)
     h.lk(g["Geometry"], m2c.inputs["Mesh"])
+
+    # Catmull-Rom interpolation smooths through the simulated points;
+    # Smooth Segments = evaluated points per span (1 = angular/off)
+    ctype = h.n("GeometryNodeCurveSplineType", -800, 100,
+                label="smooth", spline_type='CATMULL_ROM')
+    h.lk(m2c.outputs["Curve"], ctype.inputs["Curve"])
+    cres = h.n("GeometryNodeSetSplineResolution", -680, 100)
+    h.lk(ctype.outputs["Curve"], cres.inputs["Geometry"])
+    h.lk(g["Smooth Segments"], cres.inputs["Resolution"])
 
     pos = h.n("GeometryNodeInputPosition", -900, -300)
     noise = h.n("ShaderNodeTexNoise", -700, -300, label="radius noise")
@@ -59,8 +69,8 @@ def _build_group():
                   plus1.outputs["Value"], g["Strand Radius"],
                   label="strand radius")
 
-    setrad = h.n("GeometryNodeSetCurveRadius", -600, 100)
-    h.lk(m2c.outputs["Curve"], setrad.inputs["Curve"])
+    setrad = h.n("GeometryNodeSetCurveRadius", -550, 100)
+    h.lk(cres.outputs["Geometry"], setrad.inputs["Curve"])
     h.lk(radius.outputs["Value"], setrad.inputs["Radius"])
 
     circle = h.n("GeometryNodeCurvePrimitiveCircle", -300, -100,
@@ -83,9 +93,20 @@ def _build_group():
     h.lk(mat_sw.outputs["Output"], silk.inputs["Material"])
 
     # ---- dew ---------------------------------------------------------------
-    c2p = h.n("GeometryNodeCurveToPoints", -300, -700, mode='LENGTH')
+    # dew must not re-scatter as strands deform: distribute by COUNT at
+    # fixed parameters, with count derived from control-point count
+    # (constant during simulation) instead of deformed length
+    slen = h.n("GeometryNodeSplineLength", -650, -700)
+    spans = h.ma('SUBTRACT', -500, -700,
+                 slen.outputs["Point Count"], 1.0)
+    dcount = h.ma('MULTIPLY', -500, -900,
+                  spans.outputs["Value"], g["Dew Per Span"])
+    dround = h.ma('ROUND', -350, -900, dcount.outputs["Value"])
+    dmax = h.ma('MAXIMUM', -350, -700, dround.outputs["Value"], 1.0)
+
+    c2p = h.n("GeometryNodeCurveToPoints", -200, -700, mode='COUNT')
     h.lk(setrad.outputs["Curve"], c2p.inputs["Curve"])
-    h.lk(g["Dew Spacing"], c2p.inputs["Length"])
+    h.lk(dmax.outputs["Value"], c2p.inputs["Count"])
 
     rv = h.n("FunctionNodeRandomValue", -300, -1000, data_type='FLOAT')
     mn, mx = minmax_sockets(rv)
@@ -136,7 +157,7 @@ def _build_group():
     return nt
 
 
-STRANDIFY_VERSION = 2
+STRANDIFY_VERSION = 4
 
 
 def ensure_strandify_group():
