@@ -1,5 +1,5 @@
 # ============================================================================
-#  Cob Web v2.0 — all-in-one procedural web toolkit
+#  Spider Web Forge v2.0 — all-in-one procedural web toolkit
 #  ---------------------------------------------------------------------------
 #  * Generator  — procedural orb webs (radials, spiral, anchors) with pins
 #                 pre-written into the swf_pin attribute
@@ -23,7 +23,7 @@
 # ============================================================================
 
 bl_info = {
-    "name": "CobWeb-Gen ",
+    "name": "Spider Web Forge",
     "author": "Amsy",
     "version": (2, 0, 0),
     "blender": (4, 2, 0),
@@ -39,13 +39,13 @@ bl_info = {
 if "generator" in locals():
     import importlib
     for _m in (constants, nodeutils, materials, generator, solver,
-               strandify, ui):
+               strandify, gpu_native, gpu_solver, ui):
         importlib.reload(_m)
 else:
     from . import (constants, nodeutils, materials, generator, solver,
-                   strandify, ui)
+                   strandify, gpu_native, gpu_solver, ui)
 
-_modules = (generator, solver, strandify, ui)
+_modules = (generator, solver, strandify, gpu_solver, ui)
 
 
 def register():

@@ -18,6 +18,7 @@ from bpy.types import Operator
 
 from .constants import (
     GROUP_SOLVER, A_PREV, A_REST, A_PIN, A_CORR, A_ACCUM,
+    A_TENS_E, A_TENSION,
 )
 from .nodeutils import H, sock_in, input_identifier
 
@@ -39,9 +40,9 @@ def _build_group():
     sock_in(iface, "Wind",                'NodeSocketVector', (0.0, 0.0, 0.0))
     sock_in(iface, "Wind Turbulence",     'NodeSocketFloat',  0.5, 0.0, 50.0)
     sock_in(iface, "Damping",             'NodeSocketFloat',  0.99, 0.0, 1.0)
-    sock_in(iface, "Stiffness",           'NodeSocketFloat',  1.0, 0.0, 1.0)
-    sock_in(iface, "Iterations",          'NodeSocketInt',    8, 1, 64)
-    sock_in(iface, "Substeps",            'NodeSocketInt',    3, 1, 16)
+    sock_in(iface, "Stiffness",           'NodeSocketFloat',  0.8, 0.0, 1.0)
+    sock_in(iface, "Iterations",          'NodeSocketInt',    16, 1, 64)
+    sock_in(iface, "Substeps",            'NodeSocketInt',    4, 1, 16)
     sock_in(iface, "Max Valence",         'NodeSocketInt',    16, 1, 64)
     sock_in(iface, "Enable Tearing",      'NodeSocketBool',   True)
     sock_in(iface, "Tear Threshold",      'NodeSocketFloat',  1.5, 1.01, 10.0)
@@ -162,9 +163,8 @@ def _build_group():
     dsafe = h.ma('MAXIMUM', 1400, -800, dist.outputs["Value"], 1e-6)
     ratio = h.ma('DIVIDE', 1600, -600,
                  stretch.outputs["Value"], dsafe.outputs["Value"])
-    k_half = h.ma('MULTIPLY', 1600, -900, g["Stiffness"], 0.5)
     factor = h.ma('MULTIPLY', 1800, -600,
-                  ratio.outputs["Value"], k_half.outputs["Value"])
+                  ratio.outputs["Value"], 0.5)
     corr = h.vscale(2000, -600, delta.outputs["Vector"],
                     factor.outputs["Value"], label="edge correction")
 
@@ -231,8 +231,13 @@ def _build_group():
     val_max = h.ma('MAXIMUM', 3750, -700, eov_pt.outputs["Total"], 1.0)
     inv_val = h.ma('DIVIDE', 3900, -700, 1.0, val_max.outputs["Value"],
                    label="1 / valence")
+    # successive over-relaxation: Stiffness 0..1 -> SOR factor 1..2.
+    # Recovers taut, springy silk that plain Jacobi averaging softens.
+    sor = h.ma('ADD', 3900, -900, g["Stiffness"], 1.0, label="SOR")
+    relax = h.ma('MULTIPLY', 4050, -800, inv_val.outputs["Value"],
+                 sor.outputs["Value"])
     acc_avg = h.vscale(3750, -300, acc_f.outputs["Attribute"],
-                       inv_val.outputs["Value"], label="averaged corr")
+                       relax.outputs["Value"], label="averaged corr")
 
     pin2 = h.named('BOOLEAN', A_PIN, 3600, -500)
     npin2 = h.bmath('NOT', 3800, -500, pin2.outputs["Attribute"])
@@ -307,6 +312,32 @@ def _build_group():
     h.lk(r2_out.outputs["Geometry"], r1_out.inputs["Geometry"])
 
     # ---------------------------------------------------------------------
+    #  TENSION (per frame): normalized stretch, 0 = rest, 1 = tear point
+    # ---------------------------------------------------------------------
+    ev5 = h.n("GeometryNodeInputMeshEdgeVertices", 6500, -1200)
+    d5 = h.vm('DISTANCE', 6650, -1200,
+              ev5.outputs["Position 1"], ev5.outputs["Position 2"])
+    rest5 = h.named('FLOAT', A_REST, 6650, -1450)
+    rest5s = h.ma('MAXIMUM', 6800, -1450, rest5.outputs["Attribute"], 1e-8)
+    ratio5 = h.ma('DIVIDE', 6950, -1300,
+                  d5.outputs["Value"], rest5s.outputs["Value"])
+    over5 = h.ma('SUBTRACT', 7100, -1300, ratio5.outputs["Value"], 1.0)
+    denom5 = h.ma('SUBTRACT', 7100, -1500, g["Tear Threshold"], 1.0)
+    denom5s = h.ma('MAXIMUM', 7250, -1500, denom5.outputs["Value"], 0.01)
+    tens = h.ma('DIVIDE', 7400, -1300,
+                over5.outputs["Value"], denom5s.outputs["Value"],
+                label="tension 0-1")
+    tens.use_clamp = True
+
+    st_tens_e = h.store('FLOAT', 'EDGE', A_TENS_E, 6700, 100,
+                        geo=r1_out.outputs["Geometry"],
+                        value=tens.outputs["Value"])
+    tens_read = h.named('FLOAT', A_TENS_E, 6750, -800)
+    st_tens_p = h.store('FLOAT', 'POINT', A_TENSION, 6950, 100,
+                        geo=st_tens_e.outputs["Geometry"],
+                        value=tens_read.outputs["Attribute"])
+
+    # ---------------------------------------------------------------------
     #  TEARING (once per frame, after all substeps)
     # ---------------------------------------------------------------------
     ev4 = h.n("GeometryNodeInputMeshEdgeVertices", 6800, -400)
@@ -324,7 +355,7 @@ def _build_group():
 
     del_edges = h.n("GeometryNodeDeleteGeometry", 7200, 100,
                     label="TEAR", domain='EDGE', mode='EDGE_FACE')
-    h.lk(r1_out.outputs["Geometry"], del_edges.inputs["Geometry"])
+    h.lk(st_tens_p.outputs["Geometry"], del_edges.inputs["Geometry"])
     h.lk(tear_sel.outputs["Boolean"], del_edges.inputs["Selection"])
 
     eov2 = h.n("GeometryNodeEdgesOfVertex", 7400, -800)
@@ -343,7 +374,7 @@ def _build_group():
     return nt
 
 
-SOLVER_VERSION = 2
+SOLVER_VERSION = 3
 
 
 def ensure_solver_group():
@@ -381,6 +412,21 @@ def apply_solver(obj, collider=None, report=None):
                 mod[coll_id] = collider
             except (KeyError, TypeError):
                 pass
+
+    # fit the valence-gather loop to this web: the loop runs Max Valence
+    # iterations for EVERY point, so trimming 16 -> actual max (usually
+    # the hub's spoke count) is a large, free speedup
+    try:
+        counts = [0] * len(obj.data.vertices)
+        for e in obj.data.edges:
+            counts[e.vertices[0]] += 1
+            counts[e.vertices[1]] += 1
+        max_val = min(max(counts, default=16) or 16, 64)
+        val_id = input_identifier(group, "Max Valence")
+        if val_id:
+            mod[val_id] = max_val
+    except (AttributeError, KeyError, TypeError):
+        pass
     return mod
 
 
@@ -457,9 +503,21 @@ class SWF_OT_pin_vertices(Operator):
 classes = (SWF_OT_add_tearing_solver, SWF_OT_pin_vertices)
 
 
+def _safe_register(cls):
+    """Register defensively: if a class with this name survived a failed
+    or partial previous enable, evict it first."""
+    old = getattr(bpy.types, cls.__name__, None)
+    if old is not None:
+        try:
+            bpy.utils.unregister_class(old)
+        except RuntimeError:
+            pass
+    bpy.utils.register_class(cls)
+
+
 def register():
     for c in classes:
-        bpy.utils.register_class(c)
+        _safe_register(c)
 
 
 def unregister():

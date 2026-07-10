@@ -4,7 +4,7 @@
 
 import bpy
 
-from .constants import MAT_SILK, MAT_DEW
+from .constants import MAT_SILK, MAT_DEW, MAT_TENSION, A_TENSION
 
 
 def ensure_silk_material():
@@ -67,4 +67,47 @@ def ensure_dew_material():
     glass.inputs["IOR"].default_value = 1.33
     glass.inputs["Roughness"].default_value = 0.02
     nt.links.new(glass.outputs["BSDF"], out.inputs["Surface"])
+    return mat
+
+
+def ensure_tension_material():
+    """Emissive heatmap driven by the solver's swf_tension attribute:
+    deep blue at rest -> green -> yellow -> red just before tearing."""
+    mat = bpy.data.materials.get(MAT_TENSION)
+    if mat:
+        return mat
+    mat = bpy.data.materials.new(MAT_TENSION)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    nt.nodes.clear()
+    n, lk = nt.nodes.new, nt.links.new
+
+    out = n("ShaderNodeOutputMaterial"); out.location = (700, 0)
+
+    attr = n("ShaderNodeAttribute"); attr.location = (-400, 0)
+    attr.attribute_name = A_TENSION
+    attr.attribute_type = 'GEOMETRY'
+
+    ramp = n("ShaderNodeValToRGB"); ramp.location = (-150, 0)
+    cr = ramp.color_ramp
+    cr.elements[0].position = 0.0
+    cr.elements[0].color = (0.02, 0.08, 0.45, 1.0)   # rest: deep blue
+    e = cr.elements.new(0.45); e.color = (0.05, 0.75, 0.25, 1.0)  # green
+    e = cr.elements.new(0.72); e.color = (0.95, 0.85, 0.05, 1.0)  # yellow
+    cr.elements[-1].position = 1.0
+    cr.elements[-1].color = (1.0, 0.03, 0.01, 1.0)   # about to tear: red
+
+    emit = n("ShaderNodeEmission"); emit.location = (350, 0)
+    lk(attr.outputs["Fac"], ramp.inputs["Fac"])
+    lk(ramp.outputs["Color"], emit.inputs["Color"])
+
+    # hotter strands glow brighter: strength = 1 + tension * 4
+    boost = n("ShaderNodeMath"); boost.location = (100, -200)
+    boost.operation = 'MULTIPLY_ADD'
+    boost.inputs[1].default_value = 4.0
+    boost.inputs[2].default_value = 1.0
+    lk(attr.outputs["Fac"], boost.inputs[0])
+    lk(boost.outputs["Value"], emit.inputs["Strength"])
+
+    lk(emit.outputs["Emission"], out.inputs["Surface"])
     return mat

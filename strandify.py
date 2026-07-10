@@ -9,7 +9,8 @@ from bpy.types import Operator
 
 from .constants import GROUP_STRANDIFY
 from .nodeutils import H, sock_in, minmax_sockets, input_identifier
-from .materials import ensure_silk_material, ensure_dew_material
+from .materials import (ensure_silk_material, ensure_dew_material,
+                        ensure_tension_material)
 
 
 def _build_group():
@@ -24,6 +25,8 @@ def _build_group():
     sock_in(iface, "Radius Variation",   'NodeSocketFloat', 0.4, 0.0, 1.0)
     sock_in(iface, "Profile Resolution", 'NodeSocketInt',   6, 3, 16)
     sock_in(iface, "Silk Material",      'NodeSocketMaterial')
+    sock_in(iface, "Show Tension",       'NodeSocketBool',  False)
+    sock_in(iface, "Tension Material",   'NodeSocketMaterial')
     sock_in(iface, "Enable Dew",         'NodeSocketBool',  True)
     sock_in(iface, "Dew Spacing",        'NodeSocketFloat', 0.06, 0.005, 1.0)
     sock_in(iface, "Dew Amount",         'NodeSocketFloat', 0.25, 0.0, 1.0)
@@ -69,9 +72,15 @@ def _build_group():
     h.lk(setrad.outputs["Curve"], c2m.inputs["Curve"])
     h.lk(circle.outputs["Curve"], c2m.inputs["Profile Curve"])
 
+    mat_sw = h.n("GeometryNodeSwitch", 100, -100,
+                 input_type='MATERIAL', label="tension view")
+    h.lk(g["Show Tension"], mat_sw.inputs["Switch"])
+    h.lk(g["Silk Material"], mat_sw.inputs["False"])
+    h.lk(g["Tension Material"], mat_sw.inputs["True"])
+
     silk = h.n("GeometryNodeSetMaterial", 250, 100)
     h.lk(c2m.outputs["Mesh"], silk.inputs["Geometry"])
-    h.lk(g["Silk Material"], silk.inputs["Material"])
+    h.lk(mat_sw.outputs["Output"], silk.inputs["Material"])
 
     # ---- dew ---------------------------------------------------------------
     c2p = h.n("GeometryNodeCurveToPoints", -300, -700, mode='LENGTH')
@@ -127,8 +136,18 @@ def _build_group():
     return nt
 
 
+STRANDIFY_VERSION = 2
+
+
 def ensure_strandify_group():
-    return bpy.data.node_groups.get(GROUP_STRANDIFY) or _build_group()
+    nt = bpy.data.node_groups.get(GROUP_STRANDIFY)
+    if nt is not None:
+        if nt.get("swf_version", 0) >= STRANDIFY_VERSION:
+            return nt
+        nt.name = GROUP_STRANDIFY + ".old"
+    nt = _build_group()
+    nt["swf_version"] = STRANDIFY_VERSION
+    return nt
 
 
 def apply_strandify(obj):
@@ -137,7 +156,8 @@ def apply_strandify(obj):
     mod = obj.modifiers.new("SWF Strandify", 'NODES')
     mod.node_group = group
     for sock_name, mat in (("Silk Material", ensure_silk_material()),
-                           ("Dew Material", ensure_dew_material())):
+                           ("Dew Material", ensure_dew_material()),
+                           ("Tension Material", ensure_tension_material())):
         ident = input_identifier(group, sock_name)
         if ident:
             try:
@@ -165,9 +185,21 @@ class SWF_OT_add_strandify(Operator):
 classes = (SWF_OT_add_strandify,)
 
 
+def _safe_register(cls):
+    """Register defensively: if a class with this name survived a failed
+    or partial previous enable, evict it first."""
+    old = getattr(bpy.types, cls.__name__, None)
+    if old is not None:
+        try:
+            bpy.utils.unregister_class(old)
+        except RuntimeError:
+            pass
+    bpy.utils.register_class(cls)
+
+
 def register():
     for c in classes:
-        bpy.utils.register_class(c)
+        _safe_register(c)
 
 
 def unregister():
