@@ -76,7 +76,7 @@ def _build_group():
     circle = h.n("GeometryNodeCurvePrimitiveCircle", -300, -100,
                  label="profile")
     h.lk(g["Profile Resolution"], circle.inputs["Resolution"])
-    circle.inputs["Radius"].default_value = 1.0
+    circle.inputs["Radius"].default_value = 0.001
 
     c2m = h.n("GeometryNodeCurveToMesh", 0, 100)
     h.lk(setrad.outputs["Curve"], c2m.inputs["Curve"])
