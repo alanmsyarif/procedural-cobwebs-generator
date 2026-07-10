@@ -24,6 +24,6 @@ rotate the Gravity input); colliders need faces; raise Substeps for fast
 colliders; bake via Physics properties > Simulation Nodes.
 
 
-Blender 4.2+ / 5.x.
+Blender 5.2+
 
 ![Description](./images/ss1.png)
