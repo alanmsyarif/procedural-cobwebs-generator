@@ -16,7 +16,7 @@
 
 bl_info = {
     "name": "Spider Web Forge",
-    "author": "Amsy + Claude",
+    "author": "Amsy",
     "version": (2, 2, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar (N) > Web Forge",
