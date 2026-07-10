@@ -25,3 +25,5 @@ colliders; bake via Physics properties > Simulation Nodes.
 
 
 Blender 4.2+ / 5.x.
+
+![Description](./images/ss1.png)
