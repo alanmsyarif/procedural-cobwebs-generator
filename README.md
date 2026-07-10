@@ -13,7 +13,7 @@ QUICK START
 
 1. (Optional) select a mesh to use as the collider.
 
-2. N-panel > Web Forge > "Create Web + Sim + Strands".
+2. N-panel > Web Forge > "CGenerate Web + Add GPU Solver + Strandify".
 
 3. Rewind to frame 1 and press play. Push the collider through the web.
 
