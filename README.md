@@ -3,9 +3,9 @@
 Procedural spider webs for Blender with a GPU-accelerated tearing physics
 solver. Generate orb webs or chaotic corner cobwebs, simulate them with
 real silk-like physics running on your GPU (no dependencies), and render
-them as silk strands with dew droplets — all from one panel.
+them as silk strands with dew droplets all from one panel.
 
-![Blender 4.2+](https://img.shields.io/badge/Blender-4.2%2B-orange)
+![Blender 5.2+](https://img.shields.io/badge/Blender-4.2%2B-orange)
 
 ## Features
 
@@ -13,16 +13,16 @@ them as silk strands with dew droplets — all from one panel.
 - **Orb Web** — classic radial/spiral webs with scalloped sag, uneven
   spiral spacing, damage gaps, asymmetry, wavy radials, and tangle
   threads for a natural aged look.
-- **Chaotic Cobweb** — spider-spun 3D cobwebs anchored to your scene
+- **Chaotic Cobweb** spider-spun 3D cobwebs anchored to your scene
   geometry, based on the construction from Pixar's *Dust and Cobwebs for
   Toy Story 4* (SIGGRAPH 2019). Select a corner, prop, or room, and
   simulated spiders spin threads between the surfaces.
 
-**GPU physics solver** (built on Blender's native GPU module — nothing to
+**GPU physics solver** (built on Blender's native GPU module nothing to
 install)
 - Verlet / PBD solver with tearing: threads snap when overstretched
 - Silk-like unilateral constraints (threads pull, never push)
-- Tension control — taut webs or drooping catenaries
+- Tension control taut webs or drooping catenaries
 - World-space gravity and wind with turbulence
 - Collision: bounding sphere (fast) or full mesh via baked SDF
 - Deteriorate (pre-broken threads) and pre-warm (starts settled)
@@ -32,7 +32,7 @@ install)
 - Strandify: converts the simulated web to smooth silk tubes
   (Catmull-Rom smoothing, noisy radius)
 - Dew droplets that stick to strands during simulation
-- Tension heatmap material — visualize stretch from blue (rest) to red
+- Tension heatmap material visualize stretch from blue (rest) to red
   (about to tear)
 
 ## Installation
@@ -44,7 +44,7 @@ install)
 
 ## Quick start
 
-1. (Optional) select a mesh to act as the collider — or, in Chaotic
+1. (Optional) select a mesh to act as the collider or, in Chaotic
    Cobweb mode, the geometry the web anchors to.
 2. Web Forge panel → **Create Web + Sim + Strands**.
 3. Rewind to frame 1 and press play. Push the collider through the web.
