@@ -10,7 +10,7 @@ them as silk strands with dew droplets all from one panel.
 ## Features
 
 **Two web generators**
-- **Orb Web** — classic radial/spiral webs with scalloped sag, uneven
+- **Orb Web** classic radial/spiral webs with scalloped sag, uneven
   spiral spacing, damage gaps, asymmetry, wavy radials, and tangle
   threads for a natural aged look.
 - **Chaotic Cobweb** spider-spun 3D cobwebs anchored to your scene
