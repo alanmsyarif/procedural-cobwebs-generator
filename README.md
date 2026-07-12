@@ -84,4 +84,4 @@ select vertices, and use **Pin / Unpin** in the panel.
 
 ## License
 
-MIT — do whatever, credit appreciated.
+MIT do whatever, credit appreciated.
