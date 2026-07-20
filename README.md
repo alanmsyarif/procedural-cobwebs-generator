@@ -27,11 +27,21 @@ install)
 - Collision: bounding sphere (fast) or full mesh via baked SDF
 - Deteriorate (pre-broken threads) and pre-warm (starts settled)
 - Real-time playback in the viewport
+- Render-safe frame cache: every frame simulated in the viewport is
+  cached and replayed during F12/animation renders (GPU compute can't
+  run on the render thread) — play through the range once to "bake"
 
 **Rendering**
 - Strandify: converts the simulated web to smooth silk tubes
   (Catmull-Rom smoothing, noisy radius)
-- Dew droplets that stick to strands during simulation
+- Dew droplets with physics: they cling to strands, condense and grow,
+  slide down to hang under the silk, then drip off and free-fall once
+  heavy enough — respawning at their birth spot for a perpetual drip
+  cycle. Droplets on torn strands are flung off. Use **Bake Dew for
+  Render** (Render section of the panel) before rendering animations —
+  the render depsgraph can't reuse the viewport's live simulation, so
+  the bake stores it to disk (and fills the web solver's render cache
+  at the same time).
 - Tension heatmap material visualize stretch from blue (rest) to red
   (about to tear)
 

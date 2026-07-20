@@ -341,6 +341,21 @@ def _bake_sdf(gpu, web_obj, coll, res):
 #  Simulation state
 # ---------------------------------------------------------------------------
 
+def apply_arrays(obj, pos, brk, tens):
+    """Write position/broken/tension arrays into mesh attributes.
+    Pure CPU — safe to call from render-thread frame handlers, where no
+    GPU context exists (used to replay the cached sim during renders)."""
+    from .gpu_solver import _ensure_attr
+    me = obj.data
+    _ensure_attr(me, A_GPU_POS, 'FLOAT_VECTOR', 'POINT')
+    _ensure_attr(me, A_BROKEN, 'BOOLEAN', 'EDGE')
+    _ensure_attr(me, A_TENSION, 'FLOAT', 'POINT')
+    me.attributes[A_GPU_POS].data.foreach_set("vector", pos)
+    me.attributes[A_BROKEN].data.foreach_set("value", brk)
+    me.attributes[A_TENSION].data.foreach_set("value", tens)
+    me.update_tag()
+
+
 class NativeState:
     """Simulation state: step() advances physics, write_back() -> mesh."""
 
@@ -549,15 +564,10 @@ class NativeState:
         gpu.compute.dispatch(sh, gx, gy, 1)
 
     def write_back(self, obj):
-        from .gpu_solver import _ensure_attr
-        me = obj.data
-        _ensure_attr(me, A_GPU_POS, 'FLOAT_VECTOR', 'POINT')
-        _ensure_attr(me, A_BROKEN, 'BOOLEAN', 'EDGE')
-        _ensure_attr(me, A_TENSION, 'FLOAT', 'POINT')
-        me.attributes[A_GPU_POS].data.foreach_set(
-            "vector", _read(self.posA, self.n, 4)[:, :3].ravel())
-        me.attributes[A_BROKEN].data.foreach_set(
-            "value", _read(self.edges, self.m, 4)[:, 3] > 0.5)
-        me.attributes[A_TENSION].data.foreach_set(
-            "value", _read(self.tens, self.n, 1).ravel())
-        me.update_tag()
+        """Read the sim state off the GPU into mesh attributes.
+        Returns the arrays so callers can cache them for render replay."""
+        pos = np.ascontiguousarray(_read(self.posA, self.n, 4)[:, :3]).ravel()
+        brk = _read(self.edges, self.m, 4)[:, 3] > 0.5
+        tens = _read(self.tens, self.n, 1).ravel().copy()
+        apply_arrays(obj, pos, brk, tens)
+        return pos, brk, tens

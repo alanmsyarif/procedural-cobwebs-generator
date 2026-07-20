@@ -40,6 +40,70 @@ def _ensure_attr(me, name, dtype, domain):
 #  Frame handler
 # ---------------------------------------------------------------------------
 
+# GPU compute is unavailable while a render job owns the GPU: frame-change
+# handlers then run on the render thread, where the window's GPU context is
+# not active, and any gpu.* call (dispatch/texture read) crashes the Vulkan
+# backend outright. Instead, every frame simulated in the viewport is cached
+# (positions / broken edges / tension per frame), and during renders the
+# handler replays the cache with pure-CPU attribute writes. Playing through
+# the frame range once in the viewport is the "bake".
+_CACHE = {}   # obj name -> {frame: (pos, broken, tension) float32/bool}
+_RENDERING = False
+_RENDER_WARNED = False
+
+
+def _cache_store(obj, frame, arrays):
+    _CACHE.setdefault(obj.name, {})[frame] = arrays
+
+
+def _cache_apply(obj, frame):
+    """Replay a cached frame into mesh attributes (render thread safe).
+    Falls back to the nearest earlier cached frame; holds last written
+    state when nothing is cached yet."""
+    from .gpu_native import apply_arrays
+    cache = _CACHE.get(obj.name)
+    if not cache:
+        return
+    entry = cache.get(frame)
+    if entry is None:
+        earlier = [f for f in cache if f <= frame]
+        if not earlier:
+            return
+        entry = cache[max(earlier)]
+    pos, brk, tens = entry
+    me = obj.data
+    if (pos.size != len(me.vertices) * 3
+            or brk.size != len(me.edges)):
+        return   # web was regenerated since the cache was recorded
+    apply_arrays(obj, pos, brk, tens)
+
+
+@persistent
+def _on_render_begin(scene, depsgraph=None):
+    global _RENDERING, _RENDER_WARNED
+    _RENDERING = True
+    if not _RENDER_WARNED:
+        _RENDER_WARNED = True
+        print("SWF: render detected — replaying the cached web sim (GPU "
+              "compute can't run on the render thread). Play through the "
+              "frame range once in the viewport to fill the cache.")
+
+
+@persistent
+def _on_render_end(scene, depsgraph=None):
+    global _RENDERING
+    _RENDERING = False
+
+
+def _render_active():
+    if _RENDERING:
+        return True
+    try:
+        return bpy.app.is_job_running('RENDER')
+    except Exception:
+        return False
+
+
 def _reset_state(obj, g, dt):
     from .gpu_native import NativeState
     st = NativeState(obj, g)
@@ -54,6 +118,7 @@ def _on_frame(scene, depsgraph=None):
     from . import gpu_native
     if gpu_native.native_broken():
         return
+    rendering = _render_active()
     fps = scene.render.fps / scene.render.fps_base
     dt = 1.0 / max(fps, 1.0)
     frame = scene.frame_current
@@ -61,17 +126,24 @@ def _on_frame(scene, depsgraph=None):
         g = getattr(obj, "swf_gpu", None)
         if g is None or not g.enabled or obj.type != 'MESH':
             continue
+        if rendering:
+            # no GPU access on the render thread — replay the viewport cache
+            try:
+                _cache_apply(obj, frame)
+            except Exception:
+                pass
+            continue
         try:
             st = _STATES.get(obj.name)
             if (st is None or st.n != len(obj.data.vertices)
                     or frame <= scene.frame_start):
                 st = _reset_state(obj, g, dt)
                 st.last_frame = frame
-                st.write_back(obj)
+                _cache_store(obj, frame, st.write_back(obj))
             elif st.last_frame is not None and frame == st.last_frame + 1:
                 st.step(obj, g, dt)
                 st.last_frame = frame
-                st.write_back(obj)
+                _cache_store(obj, frame, st.write_back(obj))
             else:
                 st.last_frame = frame
                 st.write_back(obj)   # hold current state while scrubbing
@@ -159,6 +231,7 @@ def enable_gpu_solver(context, obj, collider=None):
         g.collider = collider
     g.enabled = True
     _STATES.pop(obj.name, None)
+    _CACHE.pop(obj.name, None)
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +331,7 @@ class SWF_OT_remove_gpu_solver(Operator):
         obj = context.object
         obj.swf_gpu.enabled = False
         _STATES.pop(obj.name, None)
+        _CACHE.pop(obj.name, None)
         for m in list(obj.modifiers):
             if (m.type == 'NODES' and m.node_group
                     and m.node_group.name.startswith(GROUP_GPU_APPLY)):
@@ -273,6 +347,7 @@ class SWF_OT_reset_gpu(Operator):
 
     def execute(self, context):
         _STATES.clear()
+        _CACHE.clear()
         from . import gpu_native
         gpu_native._clear_broken()
         return {'FINISHED'}
@@ -318,6 +393,7 @@ class SWF_OT_pin_vertices(Operator):
         if was_edit:
             bpy.ops.object.mode_set(mode='EDIT')
         _STATES.pop(obj.name, None)   # pins bake into the sim state
+        _CACHE.pop(obj.name, None)
         return {'FINISHED'}
 
 
@@ -335,6 +411,30 @@ def _safe_register(cls):
     bpy.utils.register_class(cls)
 
 
+# (handler list, our function) pairs — render begin/end guard the GPU sim
+_HANDLERS = (
+    ("frame_change_post", _on_frame),
+    ("render_init", _on_render_begin),
+    ("render_complete", _on_render_end),
+    ("render_cancel", _on_render_end),
+)
+
+
+def _install_handlers():
+    _remove_handlers()
+    for list_name, fn in _HANDLERS:
+        getattr(bpy.app.handlers, list_name).append(fn)
+
+
+def _remove_handlers():
+    for list_name, fn in _HANDLERS:
+        handlers = getattr(bpy.app.handlers, list_name)
+        for h in [h for h in handlers
+                  if getattr(h, "__name__", "") == fn.__name__
+                  and "spider_web_forge" in getattr(h, "__module__", "")]:
+            handlers.remove(h)
+
+
 def register():
     if hasattr(bpy.types.Object, "swf_gpu"):
         try:
@@ -344,21 +444,13 @@ def register():
     for c in classes:
         _safe_register(c)
     bpy.types.Object.swf_gpu = PointerProperty(type=SWF_GPUProps)
-    handlers = bpy.app.handlers.frame_change_post
-    for h in [h for h in handlers
-              if getattr(h, "__name__", "") == "_on_frame"
-              and "spider_web_forge" in getattr(h, "__module__", "")]:
-        handlers.remove(h)
-    handlers.append(_on_frame)
+    _install_handlers()
 
 
 def unregister():
-    handlers = bpy.app.handlers.frame_change_post
-    for h in [h for h in handlers
-              if getattr(h, "__name__", "") == "_on_frame"
-              and "spider_web_forge" in getattr(h, "__module__", "")]:
-        handlers.remove(h)
+    _remove_handlers()
     _STATES.clear()
+    _CACHE.clear()
     del bpy.types.Object.swf_gpu
     for c in reversed(classes):
         bpy.utils.unregister_class(c)

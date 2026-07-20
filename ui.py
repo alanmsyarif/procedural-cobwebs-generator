@@ -133,6 +133,11 @@ class SWF_PT_main(Panel):
         box.label(text="Render", icon='CURVES')
         col = box.column(align=True)
         col.operator("swf.add_strandify")
+        col.separator()
+        row = col.row(align=True)
+        row.operator("swf.bake_dew", icon='RENDER_ANIMATION')
+        row.operator("swf.free_dew_bake", text="Free", icon='X')
+        col.label(text="Bake before rendering animations.", icon='INFO')
 
         col = layout.column(align=True)
         col.label(text="Play from frame 1 to simulate.", icon='INFO')
