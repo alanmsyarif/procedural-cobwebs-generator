@@ -5,7 +5,7 @@ solver. Generate orb webs or chaotic corner cobwebs, simulate them with
 real silk-like physics running on your GPU (no dependencies), and render
 them as silk strands with dew droplets all from one panel.
 
-![Blender 5.2+](https://img.shields.io/badge/Blender-4.2%2B-orange)
+Minimum Blender 5.2 LTS Version
 
 ## Features
 
