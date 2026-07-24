@@ -18,6 +18,10 @@ Minimum Blender 5.2 LTS Version
   Toy Story 4* (SIGGRAPH 2019). Select a corner, prop, or room, and
   simulated spiders spin threads between the surfaces.
 
+**Live Update** toggle it on (Generate panel) after generating a web and
+every parameter above rebuilds the web instantly as you drag the
+sliders — dial in the look in realtime, then add the solver and strands.
+
 **GPU physics solver** (built on Blender's native GPU module nothing to
 install)
 - Verlet / PBD solver with tearing: threads snap when overstretched

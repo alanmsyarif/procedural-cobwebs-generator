@@ -13,6 +13,7 @@
 # tearing solver binds automatically. No bmesh operators are used, so vertex
 # references stay valid throughout.
 
+import json
 import math
 import random
 
@@ -22,11 +23,48 @@ import bpy
 import bmesh
 from mathutils.bvhtree import BVHTree
 from bpy.props import (
-    IntProperty, FloatProperty, EnumProperty,
+    IntProperty, FloatProperty, EnumProperty, BoolProperty,
+    PointerProperty,
 )
 from bpy.types import Operator, PropertyGroup
 
 from .constants import A_PIN
+
+
+# A property `update` callback runs in a restricted context where editing
+# bpy.data (creating meshes, swapping obj.data) is unsafe, so the rebuild
+# is deferred to a one-shot timer. The pending flag also coalesces the
+# flurry of updates from dragging a slider into a single regeneration.
+_LIVE_PENDING = False
+
+
+def _live_update(self, context):
+    """Property update hook: schedule a live rebuild if Live Update is on
+    and a generated web is being tracked."""
+    global _LIVE_PENDING
+    if _LIVE_PENDING:
+        return
+    p = getattr(context.scene, "swf_web", None)
+    if p is None or not p.live or p.live_obj is None:
+        return
+    _LIVE_PENDING = True
+    bpy.app.timers.register(_live_timer, first_interval=0.0)
+
+
+def _live_timer():
+    """Runs just after a parameter change, in a context where rebuilding
+    the mesh is safe. Returns None so it fires only once."""
+    global _LIVE_PENDING
+    _LIVE_PENDING = False
+    context = bpy.context
+    p = getattr(context.scene, "swf_web", None)
+    if p is None or not p.live or p.live_obj is None:
+        return None
+    try:
+        regenerate_live(context, p)
+    except Exception as ex:                     # never break the UI
+        print("Spider Web Forge live update failed:", ex)
+    return None
 
 
 class SWF_WebProps(PropertyGroup):
@@ -36,81 +74,145 @@ class SWF_WebProps(PropertyGroup):
                ('CHAOS', "Chaotic Cobweb",
                 "Spider-spun corner cobweb anchored to selected meshes "
                 "(Pixar / Thomas Kole construction)")],
-        default='ORB')
+        default='ORB', update=_live_update)
     cobweb_initial: IntProperty(
         name="Initial Lines", default=36, min=2, max=200,
         description="Anchor threads cast between the selected surfaces "
-                    "before spinning starts")
+                    "before spinning starts", update=_live_update)
     cobweb_spiders: IntProperty(
         name="Spiders", default=6, min=1, max=32,
-        description="Concurrent spinners (Pixar used 5-10)")
+        description="Concurrent spinners (Pixar used 5-10)",
+        update=_live_update)
     cobweb_steps: IntProperty(
         name="Spin Steps", default=600, min=10, max=3000,
-        description="Total threads spun (Pixar used 50-1000)")
+        description="Total threads spun (Pixar used 50-1000)",
+        update=_live_update)
     cobweb_spread: FloatProperty(
         name="Spread", default=0.6, min=0.0, max=1.0,
         description="0 = spiders knit dense local clumps, 1 = spinning "
                     "distributes uniformly across the whole volume "
-                    "(spiders relocate often and take long bridging jumps)")
+                    "(spiders relocate often and take long bridging jumps)",
+        update=_live_update)
     cobweb_jump: FloatProperty(
         name="Jump Distance", default=0.4, min=0.01, max=10.0,
         subtype='DISTANCE',
         description="Max distance a spider jumps per step — larger is "
-                    "more chaotic, smaller is denser")
+                    "more chaotic, smaller is denser", update=_live_update)
     radials: IntProperty(
         name="Radials", default=16, min=3, max=64,
-        description="Number of radial threads")
+        description="Number of radial threads", update=_live_update)
     rings: IntProperty(
         name="Spiral Turns", default=14, min=2, max=60,
-        description="Number of turns in the capture spiral")
+        description="Number of turns in the capture spiral",
+        update=_live_update)
     radius: FloatProperty(
         name="Radius", default=1.0, min=0.05, max=50.0,
-        subtype='DISTANCE', description="Web radius")
+        subtype='DISTANCE', description="Web radius", update=_live_update)
     hub_factor: FloatProperty(
         name="Hub Size", default=0.08, min=0.01, max=0.5,
-        description="Hub radius as a fraction of the web radius")
+        description="Hub radius as a fraction of the web radius",
+        update=_live_update)
     jitter: FloatProperty(
         name="Irregularity", default=0.3, min=0.0, max=1.0,
-        description="Angular drift, spacing unevenness and positional noise")
+        description="Angular drift, spacing unevenness and positional noise",
+        update=_live_update)
     spiral_sag: FloatProperty(
         name="Spiral Sag", default=0.3, min=0.0, max=1.0,
         description="How much spiral threads droop into scallops "
-                    "between radials")
+                    "between radials", update=_live_update)
     damage: FloatProperty(
         name="Damage", default=0.15, min=0.0, max=0.9,
         description="Fraction of spiral segments missing (radials break "
-                    "at a lower rate)")
+                    "at a lower rate)", update=_live_update)
     asymmetry: FloatProperty(
         name="Asymmetry", default=0.25, min=0.0, max=1.0,
-        description="Smooth variation of the web radius around the circle")
+        description="Smooth variation of the web radius around the circle",
+        update=_live_update)
     tangles: IntProperty(
         name="Tangle Threads", default=8, min=0, max=40,
-        description="Slack chaotic threads drooping across the web")
+        description="Slack chaotic threads drooping across the web",
+        update=_live_update)
     detail: IntProperty(
         name="Detail", default=2, min=1, max=5,
         description="Sub-points per thread span (sag resolution for the "
-                    "solver and the scallops)")
+                    "solver and the scallops)", update=_live_update)
     anchors: IntProperty(
         name="Anchor Threads", default=5, min=1, max=16,
-        description="Number of anchor threads extended past the rim")
+        description="Number of anchor threads extended past the rim",
+        update=_live_update)
     anchor_extend: FloatProperty(
         name="Anchor Length", default=0.35, min=0.05, max=3.0,
-        description="Anchor thread length as a fraction of the web radius")
-    seed: IntProperty(name="Seed", default=0, min=0)
+        description="Anchor thread length as a fraction of the web radius",
+        update=_live_update)
+    seed: IntProperty(name="Seed", default=0, min=0, update=_live_update)
     plane: EnumProperty(
         name="Plane",
         items=[('XZ', "XZ (vertical)",
                 "Vertical web — sags naturally under -Z gravity"),
                ('XY', "XY (horizontal)", "Flat web in the ground plane")],
-        default='XZ')
+        default='XZ', update=_live_update)
+
+    # ---- realtime tweaking ------------------------------------------------
+    live: BoolProperty(
+        name="Live Update", default=False,
+        description="Rebuild the last generated web instantly as you tweak "
+                    "the parameters above. Do this before adding the "
+                    "solver — regenerating changes the topology",
+        update=_live_update)
+    live_obj: PointerProperty(
+        type=bpy.types.Object,
+        description="The generated web currently being tweaked live")
+
+
+def build_web_data(context, p, env_objs=None):
+    """Build the web mesh datablock from properties. Returns
+    (mesh, name), or None for invalid setups (e.g. Chaotic with no
+    anchor geometry)."""
+    if p.mode == 'CHAOS':
+        return _build_cobweb(context, p, env_objs or [])
+    return _build_orb(context, p)
 
 
 def build_web_object(context, p, env_objs=None):
     """Create the web object from properties. Returns the object,
     or None (with a reason string) for invalid setups."""
-    if p.mode == 'CHAOS':
-        return _build_cobweb(context, p, env_objs or [])
-    return _build_orb(context, p)
+    res = build_web_data(context, p, env_objs)
+    if res is None:
+        return None
+    me, name = res
+    return _finalize(context, me, name)
+
+
+def regenerate_live(context, p):
+    """Rebuild the tracked live web in place: swap fresh mesh data into
+    the existing object so its transform, name and any downstream edits
+    of the object (not the mesh) are preserved. Anchor geometry for
+    Chaotic mode is restored from names stored at generation time."""
+    obj = p.live_obj
+    if obj is None or obj.name not in bpy.data.objects:
+        return
+    if obj.type != 'MESH' or obj.mode != 'OBJECT':
+        return
+    env = []
+    raw = obj.get("swf_env")
+    if raw:
+        try:
+            env = [bpy.data.objects[n] for n in json.loads(raw)
+                   if n in bpy.data.objects]
+        except Exception:
+            env = []
+    res = build_web_data(context, p, env)
+    if res is None:                              # invalid — keep old data
+        return
+    me, name = res
+    old = obj.data
+    obj.data = me
+    me.name = name
+    if old.users == 0:
+        try:
+            bpy.data.meshes.remove(old)
+        except Exception:
+            pass
 
 
 def _build_orb(context, p):
@@ -292,7 +394,7 @@ def _build_orb(context, p):
     for idx in pin_indices:
         attr.data[idx].value = True
 
-    return _finalize(context, me, "SpiderWeb")
+    return me, "SpiderWeb"
 
 
 def _finalize(context, me, name):
@@ -527,7 +629,7 @@ def _build_cobweb(context, p, env_objs):
     for idx in pin_indices:
         attr.data[idx].value = True
 
-    return _finalize(context, me, "Cobweb")
+    return me, "Cobweb"
 
 
 class SWF_OT_generate_web(Operator):
@@ -538,13 +640,18 @@ class SWF_OT_generate_web(Operator):
 
     def execute(self, context):
         p = context.scene.swf_web
-        env = [o for o in context.selected_objects if o.type == 'MESH']
+        env = [o for o in context.selected_objects
+               if o.type == 'MESH' and not o.get("swf_web")]
         obj = build_web_object(context, p, env)
         if obj is None:
             self.report({'ERROR'},
                         "Chaotic Cobweb needs selected mesh geometry to "
                         "anchor to (select a corner/prop, then generate).")
             return {'CANCELLED'}
+        # remember the anchor geometry and track this web so Live Update
+        # can rebuild it in place as parameters change
+        obj["swf_env"] = json.dumps([o.name for o in env])
+        p.live_obj = obj
         return {'FINISHED'}
 
 

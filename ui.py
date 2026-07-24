@@ -25,6 +25,9 @@ class SWF_OT_full_setup(Operator):
                         "Chaotic Cobweb needs selected mesh geometry to "
                         "anchor to.")
             return {'CANCELLED'}
+        # this web gets a solver + strandify — don't let Live Update
+        # rebuild it (that would change topology under the solver)
+        context.scene.swf_web.live_obj = None
         if gpu_backend_available():
             enable_gpu_solver(context, obj, collider)
         else:
@@ -81,6 +84,14 @@ class SWF_PT_main(Panel):
             col.prop(p, "plane")
         col.separator()
         col.operator("swf.generate_web", icon='ADD')
+        row = col.row(align=True)
+        row.prop(p, "live", toggle=True, icon='MOD_TIME')
+        if p.live:
+            if p.live_obj is not None:
+                row.label(text="", icon='CHECKMARK')
+            else:
+                col.label(text="Generate a web to tweak it live.",
+                          icon='INFO')
         col.operator("swf.full_setup", icon='PLAY')
 
         box = layout.box()

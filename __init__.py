@@ -17,7 +17,7 @@
 bl_info = {
     "name": "Spider Web Forge",
     "author": "Amsy",
-    "version": (2, 5, 0),
+    "version": (2, 6, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar (N) > Web Forge",
     "description": "Procedural webs with a native-GPU tearing solver, "
