@@ -75,10 +75,16 @@ def _build_group():
     pos = h.n("GeometryNodeInputPosition", -900, -300)
     noise = h.n("ShaderNodeTexNoise", -700, -300, label="radius noise")
     h.lk(pos.outputs["Position"], noise.inputs["Vector"])
-    noise.inputs["Scale"].default_value = 25.0
+    # ~8 undulates along a strand; 25 was per-point speckle that averaged
+    # out to a visually uniform tube
+    noise.inputs["Scale"].default_value = 8.0
 
+    # Fac is gaussian around 0.5 (roughly 0.3..0.7), not a full 0..1 sweep,
+    # so the old gain of 2.0 delivered about a fifth of the asked-for
+    # variation. 6.0 makes Radius Variation read roughly as a fraction.
+    # Tune this if strands look too lumpy or too even.
     cen = h.ma('SUBTRACT', -500, -300, noise.outputs["Fac"], 0.5)
-    cen2 = h.ma('MULTIPLY', -350, -300, cen.outputs["Value"], 2.0)
+    cen2 = h.ma('MULTIPLY', -350, -300, cen.outputs["Value"], 6.0)
     varied = h.ma('MULTIPLY', -200, -300,
                   cen2.outputs["Value"], g["Radius Variation"])
     # per-point curve radius carries only the noise variation (mean 1.0);
@@ -86,10 +92,12 @@ def _build_group():
     # by the Strand Radius group input
     plus1 = h.ma('ADD', -50, -300, varied.outputs["Value"], 1.0,
                  label="radius variation")
+    # floor it — a zero/negative radius pinches or inverts the tube
+    rmin = h.ma('MAXIMUM', 100, -300, plus1.outputs["Value"], 0.05)
 
     setrad = h.n("GeometryNodeSetCurveRadius", -550, 100)
     h.lk(cres.outputs["Geometry"], setrad.inputs["Curve"])
-    h.lk(plus1.outputs["Value"], setrad.inputs["Radius"])
+    h.lk(rmin.outputs["Value"], setrad.inputs["Radius"])
 
     circle = h.n("GeometryNodeCurvePrimitiveCircle", -300, -100,
                  label="profile")
@@ -455,7 +463,7 @@ def _build_group():
     return nt
 
 
-STRANDIFY_VERSION = 6
+STRANDIFY_VERSION = 7
 
 
 def ensure_strandify_group():
