@@ -36,6 +36,7 @@ def _build_group():
     sock_in(iface, "Strand Radius",      'NodeSocketFloat', 0.001,
             0.00005, 0.01)
     sock_in(iface, "Radius Variation",   'NodeSocketFloat', 0.4, 0.0, 1.0)
+    sock_in(iface, "Radius Taper",       'NodeSocketFloat', 0.6, 0.0, 0.95)
     sock_in(iface, "Profile Resolution", 'NodeSocketInt',   6, 3, 16)
     sock_in(iface, "Smooth Segments",    'NodeSocketInt',   4, 1, 12)
     sock_in(iface, "Silk Material",      'NodeSocketMaterial')
@@ -92,8 +93,28 @@ def _build_group():
     # by the Strand Radius group input
     plus1 = h.ma('ADD', -50, -300, varied.outputs["Value"], 1.0,
                  label="radius variation")
+
+    # taper: fat where the strand meets a junction, thin at mid-span — the
+    # shape real silk takes between two anchors. Symmetric on the spline
+    # parameter so it does not depend on which end the spline starts at;
+    # a torn strand's new end tapers too, which is what we want.
+    sparam = h.n("GeometryNodeSplineParameter", -900, -600)
+    tc0 = h.ma('MULTIPLY', -700, -600, sparam.outputs["Factor"], 2.0)
+    tc1 = h.ma('SUBTRACT', -550, -600, tc0.outputs["Value"], 1.0)
+    tc2 = h.ma('ABSOLUTE', -400, -600, tc1.outputs["Value"])
+    mid = h.ma('SUBTRACT', -250, -600, 1.0, tc2.outputs["Value"],
+               label="mid-span weight")
+    # ease it so the fat part hugs the junction instead of ramping linearly
+    mid2 = h.ma('POWER', -100, -600, mid.outputs["Value"], 0.6)
+    tdrop = h.ma('MULTIPLY', 50, -600, mid2.outputs["Value"],
+                 g["Radius Taper"])
+    taper = h.ma('SUBTRACT', 200, -600, 1.0, tdrop.outputs["Value"],
+                 label="taper")
+
+    tapered = h.ma('MULTIPLY', 250, -300, plus1.outputs["Value"],
+                   taper.outputs["Value"])
     # floor it — a zero/negative radius pinches or inverts the tube
-    rmin = h.ma('MAXIMUM', 100, -300, plus1.outputs["Value"], 0.05)
+    rmin = h.ma('MAXIMUM', 400, -300, tapered.outputs["Value"], 0.05)
 
     setrad = h.n("GeometryNodeSetCurveRadius", -550, 100)
     h.lk(cres.outputs["Geometry"], setrad.inputs["Curve"])
@@ -463,7 +484,7 @@ def _build_group():
     return nt
 
 
-STRANDIFY_VERSION = 7
+STRANDIFY_VERSION = 8
 
 
 def ensure_strandify_group():
