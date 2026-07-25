@@ -128,6 +128,12 @@ def _build_group():
     c2m = h.n("GeometryNodeCurveToMesh", 0, 100)
     h.lk(setrad.outputs["Curve"], c2m.inputs["Curve"])
     h.lk(circle.outputs["Curve"], c2m.inputs["Profile Curve"])
+    # 4.3+ dropped the implicit "profile is scaled by the curve radius
+    # attribute" behaviour in favour of an explicit Scale input — without
+    # this the radius above is written and then ignored, and every strand
+    # renders dead uniform. Set Curve Radius stays for the 4.2 path.
+    if "Scale" in c2m.inputs:
+        h.lk(rmin.outputs["Value"], c2m.inputs["Scale"])
 
     mat_sw = h.n("GeometryNodeSwitch", 100, -100,
                  input_type='MATERIAL', label="tension view")
@@ -484,7 +490,7 @@ def _build_group():
     return nt
 
 
-STRANDIFY_VERSION = 8
+STRANDIFY_VERSION = 9
 
 
 def ensure_strandify_group():
