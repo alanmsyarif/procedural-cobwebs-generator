@@ -18,14 +18,14 @@ Minimum Blender 5.2 LTS Version
   Toy Story 4* (SIGGRAPH 2019). Select a corner, prop, or room, and
   simulated spiders spin threads between the surfaces. **Clumping**
   draws spiders toward a few random attractor spots, knitting dense
-  knots with sparser spans between — the uneven density of real webs.
+  knots with sparser spans between the uneven density of real webs.
   **Bridge Bias** sets how much the anchors commit to spanning gaps:
   0 = local webbing hugging each surface, 1 = long cables strung
   between separate/floating pieces of geometry (a bridge).
 
 **Live Update** toggle it on (Generate panel) after generating a web and
 every parameter above rebuilds the web instantly as you drag the
-sliders — dial in the look in realtime, then add the solver and strands.
+sliders dial in the look in realtime, then add the solver and strands.
 
 **GPU physics solver** (built on Blender's native GPU module nothing to
 install)
@@ -36,23 +36,23 @@ install)
 - Collision: bounding sphere (fast) or full mesh via baked SDF, against
   a single object or an entire **collision collection** (all its meshes
   merged into one field)
-- **Stickiness**: threads adhere to the collider on contact — a
+- **Stickiness**: threads adhere to the collider on contact a
   tunable fraction of contacting points latch to the surface so the web
   drapes and clings instead of sliding off
 - Deteriorate (pre-broken threads) and pre-warm (starts settled)
 - Real-time playback in the viewport
 - Render-safe frame cache: every frame simulated in the viewport is
   cached and replayed during F12/animation renders (GPU compute can't
-  run on the render thread) — play through the range once to "bake"
+  run on the render thread) play through the range once to "bake"
 
 **Rendering**
 - Strandify: converts the simulated web to smooth silk tubes
   (Catmull-Rom smoothing, noisy radius)
 - Dew droplets with physics: they cling to strands, condense and grow,
   slide down to hang under the silk, then drip off and free-fall once
-  heavy enough — respawning at their birth spot for a perpetual drip
+  heavy enough respawning at their birth spot for a perpetual drip
   cycle. Droplets on torn strands are flung off. Use **Bake Dew for
-  Render** (Render section of the panel) before rendering animations —
+  Render** (Render section of the panel) before rendering animations
   the render depsgraph can't reuse the viewport's live simulation, so
   the bake stores it to disk (and fills the web solver's render cache
   at the same time).
