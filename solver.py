@@ -391,7 +391,7 @@ def ensure_solver_group():
 def apply_solver(obj, collider=None, report=None):
     """Add the solver modifier to obj, bind the pin attribute, set collider."""
     group = ensure_solver_group()
-    mod = obj.modifiers.new("SWF Tearing Solver", 'NODES')
+    mod = obj.modifiers.new("Arachne Tearing Solver", 'NODES')
     mod.node_group = group
 
     pin_id = input_identifier(group, "Pin Vertices")
@@ -434,10 +434,10 @@ def apply_solver(obj, collider=None, report=None):
 #  Operators
 # ============================================================================
 
-class SWF_OT_add_tearing_solver(Operator):
+class ARN_OT_add_tearing_solver(Operator):
     """Add the tearing web solver to the active object.
     If another mesh is also selected, it becomes the collider."""
-    bl_idname = "swf.add_tearing_solver"
+    bl_idname = "arachne.add_tearing_solver"
     bl_label = "Add Tearing Solver"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -456,9 +456,9 @@ class SWF_OT_add_tearing_solver(Operator):
         return {'FINISHED'}
 
 
-class SWF_OT_pin_vertices(Operator):
+class ARN_OT_pin_vertices(Operator):
     """Write the current Edit Mode vertex selection into the pin attribute"""
-    bl_idname = "swf.pin_vertices"
+    bl_idname = "arachne.pin_vertices"
     bl_label = "Pin Selected"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -500,7 +500,7 @@ class SWF_OT_pin_vertices(Operator):
         return {'FINISHED'}
 
 
-classes = (SWF_OT_add_tearing_solver, SWF_OT_pin_vertices)
+classes = (ARN_OT_add_tearing_solver, ARN_OT_pin_vertices)
 
 
 def _safe_register(cls):

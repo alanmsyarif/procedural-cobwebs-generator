@@ -8,11 +8,11 @@ from .gpu_solver import enable_gpu_solver, gpu_backend_available
 from .strandify import apply_strandify
 
 
-class SWF_OT_full_setup(Operator):
+class ARN_OT_full_setup(Operator):
     """Generate a web with the GPU solver and strandify already applied.
     If a mesh is selected when you click, it becomes the collider
     (and, in Chaotic Cobweb mode, the anchor geometry)"""
-    bl_idname = "swf.full_setup"
+    bl_idname = "arachne.full_setup"
     bl_label = "Create Web + Sim + Strands"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -39,11 +39,11 @@ class SWF_OT_full_setup(Operator):
         return {'FINISHED'}
 
 
-class SWF_PT_main(Panel):
-    bl_label = "Spider Web Forge"
+class ARN_PT_main(Panel):
+    bl_label = "Arachne"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "Web Forge"
+    bl_category = "Arachne"
 
     def draw(self, context):
         layout = self.layout
@@ -60,6 +60,8 @@ class SWF_PT_main(Panel):
             col.prop(p, "cobweb_steps")
             col.prop(p, "cobweb_jump")
             col.prop(p, "cobweb_spread")
+            col.prop(p, "cobweb_clump")
+            col.prop(p, "cobweb_bridge")
             col.prop(p, "radius", text="Anchor Span")
             col.prop(p, "spiral_sag", text="Thread Sag")
             col.prop(p, "jitter")
@@ -83,7 +85,7 @@ class SWF_PT_main(Panel):
             col.prop(p, "seed")
             col.prop(p, "plane")
         col.separator()
-        col.operator("swf.generate_web", icon='ADD')
+        col.operator("arachne.generate_web", icon='ADD')
         row = col.row(align=True)
         row.prop(p, "live", toggle=True, icon='MOD_TIME')
         if p.live:
@@ -92,14 +94,14 @@ class SWF_PT_main(Panel):
             else:
                 col.label(text="Generate a web to tweak it live.",
                           icon='INFO')
-        col.operator("swf.full_setup", icon='PLAY')
+        col.operator("arachne.full_setup", icon='PLAY')
 
         box = layout.box()
         box.label(text="GPU Solver", icon='MEMORY')
         col = box.column(align=True)
         if not gpu_backend_available():
             col.label(text="GPU compute unavailable.", icon='ERROR')
-        col.operator("swf.add_gpu_solver", icon='PLAY')
+        col.operator("arachne.add_gpu_solver", icon='PLAY')
         obj = context.object
         if obj and obj.type == 'MESH' and obj.swf_gpu.enabled:
             g = obj.swf_gpu
@@ -120,41 +122,43 @@ class SWF_PT_main(Panel):
             col.separator()
             col.prop(g, "enable_collision")
             col.prop(g, "collision_shape", text="")
-            if g.collision_shape == 'MESH_SDF':
+            if g.collision_shape == 'MESH_SDF' or g.collider_collection:
                 col.prop(g, "sdf_resolution")
             col.prop(g, "collider")
+            col.prop(g, "collider_collection")
             col.prop(g, "collision_offset")
             col.prop(g, "friction")
+            col.prop(g, "stickiness")
             col.separator()
             col.prop(g, "enable_tearing")
             col.prop(g, "tear_threshold")
             col.separator()
             row = col.row(align=True)
-            row.operator("swf.reset_gpu", icon='FILE_REFRESH')
-            row.operator("swf.remove_gpu_solver", text="Remove", icon='X')
+            row.operator("arachne.reset_gpu", icon='FILE_REFRESH')
+            row.operator("arachne.remove_gpu_solver", text="Remove", icon='X')
         col.separator()
         col.label(text="Anchors (Edit Mode):")
         row = col.row(align=True)
-        row.operator("swf.pin_vertices", text="Pin").action = 'PIN'
-        row.operator("swf.pin_vertices", text="Unpin").action = 'UNPIN'
-        col.operator("swf.pin_vertices",
+        row.operator("arachne.pin_vertices", text="Pin").action = 'PIN'
+        row.operator("arachne.pin_vertices", text="Unpin").action = 'UNPIN'
+        col.operator("arachne.pin_vertices",
                      text="Clear All Pins").action = 'CLEAR'
 
         box = layout.box()
         box.label(text="Render", icon='CURVES')
         col = box.column(align=True)
-        col.operator("swf.add_strandify")
+        col.operator("arachne.add_strandify")
         col.separator()
         row = col.row(align=True)
-        row.operator("swf.bake_dew", icon='RENDER_ANIMATION')
-        row.operator("swf.free_dew_bake", text="Free", icon='X')
+        row.operator("arachne.bake_dew", icon='RENDER_ANIMATION')
+        row.operator("arachne.free_dew_bake", text="Free", icon='X')
         col.label(text="Bake before rendering animations.", icon='INFO')
 
         col = layout.column(align=True)
         col.label(text="Play from frame 1 to simulate.", icon='INFO')
 
 
-classes = (SWF_OT_full_setup, SWF_PT_main)
+classes = (ARN_OT_full_setup, ARN_PT_main)
 
 
 def _safe_register(cls):

@@ -1,12 +1,19 @@
-# Shared names used across Spider Web Forge modules.
+# Shared names used across Arachne modules.
+#
+# NOTE: the `swf_` prefix on attributes and custom properties below is
+# deliberate legacy. Those keys are written into .blend files (mesh
+# attributes, object/scene properties), so renaming them would silently
+# break every web saved before the Arachne rebrand — pins, solver state
+# and dew droplets would all reset. Display names are rebranded; these
+# storage keys stay put. Only rename them alongside a migration pass.
 
-GROUP_SOLVER    = "SWF Tearing Solver"
-GROUP_STRANDIFY = "SWF Strandify"
-GROUP_GPU_APPLY = "SWF GPU Apply"
+GROUP_SOLVER    = "Arachne Tearing Solver"
+GROUP_STRANDIFY = "Arachne Strandify"
+GROUP_GPU_APPLY = "Arachne GPU Apply"
 
-MAT_SILK    = "SWF Silk"
-MAT_DEW     = "SWF Dew"
-MAT_TENSION = "SWF Tension"
+MAT_SILK    = "Arachne Silk"
+MAT_DEW     = "Arachne Dew"
+MAT_TENSION = "Arachne Tension"
 
 # Attributes (prefixed to avoid collisions with user data)
 A_PREV   = "swf_prev"       # POINT vector — previous position (verlet state)

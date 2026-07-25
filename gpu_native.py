@@ -23,7 +23,7 @@
 #   p3 = (wind_local.xyz, sor)
 #   p4 = (sphere.xyz, sphere_radius)
 #   p5 = (collision_offset, friction, tear_threshold, tearing_on)
-#   p6 = (resist_compression, sdf_on, 0, 0)
+#   p6 = (resist_compression, sdf_on, stickiness, 0)
 #   p7 = (sdf_box_min.xyz, sdf_delta.x)
 #   p8 = (sdf_inv_cell.xyz, sdf_delta.y)
 
@@ -56,7 +56,7 @@ def native_broken():
 def _mark_broken(ex):
     global _BROKEN_FLAG
     _BROKEN_FLAG = True
-    print("SWF native GPU backend disabled after error:", ex)
+    print("Arachne native GPU backend disabled after error:", ex)
 
 
 def _clear_broken():
@@ -121,6 +121,7 @@ void main() {
     vec4 P4 = imageLoad(posIn, texel(i));
     vec3 P = P4.xyz;
     if (P4.w > 0.5) { imageStore(posOut, texel(i), P4); return; }
+    float outw = P4.w;   /* may latch to a pin (1.0) on sticky contact */
 
     vec2 off2 = imageLoad(incOff, texel(i)).xy;
     int start = int(off2.x); int cnt = int(off2.y);
@@ -169,9 +170,20 @@ void main() {
                                                 : vec3(0.0, 0.0, 1.0);
                 vec3 target = P + n * (coff - d);
                 vec3 pv = imageLoad(prevI, texel(i)).xyz;
+                /* stickiness p6.z: a per-point fraction of contacts
+                   latch to the surface (become pins), the rest just
+                   slide/settle with friction — sticky silk catching */
+                float adhere = 0.0;
+                if (p6.z > 0.0) {
+                    float hr = fract(sin(float(i) * 12.9898 + 4.1)
+                                     * 43758.5453);
+                    if (hr < p6.z) { adhere = 1.0; }
+                }
+                float pb = mix(p5.y, 1.0, adhere);
                 imageStore(prevI, texel(i),
-                           vec4(pv + (target - pv) * p5.y, 0.0));
+                           vec4(pv + (target - pv) * pb, 0.0));
                 P = target;
+                outw = max(outw, adhere);
             }
         }
     } else if (p4.w > 0.0) {
@@ -184,12 +196,20 @@ void main() {
             vec3 nrm = d / max(len, 1e-9);
             vec3 target = c + nrm * rr;
             vec3 pv = imageLoad(prevI, texel(i)).xyz;
+            float adhere = 0.0;
+            if (p6.z > 0.0) {
+                float hr = fract(sin(float(i) * 12.9898 + 4.1)
+                                 * 43758.5453);
+                if (hr < p6.z) { adhere = 1.0; }
+            }
+            float pb = mix(p5.y, 1.0, adhere);
             imageStore(prevI, texel(i),
-                       vec4(pv + (target - pv) * p5.y, 0.0));
+                       vec4(pv + (target - pv) * pb, 0.0));
             P = target;
+            outw = max(outw, adhere);
         }
     }
-    imageStore(posOut, texel(i), vec4(P, P4.w));
+    imageStore(posOut, texel(i), vec4(P, outw));
 }
 """
 
@@ -286,18 +306,37 @@ def _shader(gpu, source, images, n, m, sdf_res):
 #  SDF bake (CPU, once per sim reset)
 # ---------------------------------------------------------------------------
 
-def _bake_sdf(gpu, web_obj, coll, res):
-    """Signed distance field of the collider, in web-local space,
-    sampled on a res^3 grid via BVH nearest queries."""
+def _collect_colliders(g):
+    """Mesh objects to collide against: every mesh in the collision
+    collection if one is set, otherwise the single collider object."""
+    coll = getattr(g, "collider_collection", None)
+    if coll is not None:
+        return [o for o in coll.all_objects
+                if o.type == 'MESH' and not o.get("swf_web")]
+    if g.collider is not None and g.collider.type == 'MESH':
+        return [g.collider]
+    return []
+
+
+def _bake_sdf(gpu, web_obj, colliders, res):
+    """Signed distance field of the collider(s), in web-local space,
+    sampled on a res^3 grid via BVH nearest queries. Multiple colliders
+    (a collection) are merged into one field."""
     from mathutils.bvhtree import BVHTree
     deps = bpy.context.evaluated_depsgraph_get()
-    ob = coll.evaluated_get(deps)
-    me = ob.to_mesh()
-    me.calc_loop_triangles()
-    M = web_obj.matrix_world.inverted() @ coll.matrix_world
-    verts = [tuple(M @ v.co) for v in me.vertices]
-    tris = [tuple(lt.vertices) for lt in me.loop_triangles]
-    ob.to_mesh_clear()
+    winv = web_obj.matrix_world.inverted()
+    verts = []
+    tris = []
+    for coll in colliders:
+        ob = coll.evaluated_get(deps)
+        me = ob.to_mesh()
+        me.calc_loop_triangles()
+        M = winv @ coll.matrix_world
+        base = len(verts)
+        verts.extend(tuple(M @ v.co) for v in me.vertices)
+        tris.extend(tuple(base + i for i in lt.vertices)
+                    for lt in me.loop_triangles)
+        ob.to_mesh_clear()
     if not tris:
         return None
     bvh = BVHTree.FromPolygons(verts, tris)
@@ -309,7 +348,7 @@ def _bake_sdf(gpu, web_obj, coll, res):
     bmin = bmin - pad
     bmax = bmax + pad
 
-    print("SWF: baking collider SDF (%d^3)..." % res)
+    print("Arachne: baking collider SDF (%d^3)..." % res)
     axes = [np.linspace(bmin[k], bmax[k], res) for k in range(3)]
     dist = np.full((res, res, res), 1e3, np.float32)
     for iz in range(res):
@@ -323,11 +362,13 @@ def _bake_sdf(gpu, web_obj, coll, res):
                     continue
                 sgn = 1.0 if (p - co).dot(nrm) >= 0.0 else -1.0
                 dist[iz, iy, ix] = sgn * d
-    print("SWF: SDF bake done.")
+    print("Arachne: SDF bake done.")
 
     inv_cell = (res - 1) / np.maximum(bmax - bmin, 1e-9)
-    bake_loc = np.array(
-        web_obj.matrix_world.inverted() @ coll.matrix_world.translation)
+    # location tracking only makes sense for a single rigid collider;
+    # a collection is treated as static (baked once)
+    bake_loc = np.array(web_obj.matrix_world.inverted()
+                        @ colliders[0].matrix_world.translation)
     return {
         "tex": _tex3d(gpu, res, dist),
         "bmin": bmin.astype(np.float64),
@@ -420,16 +461,25 @@ class NativeState:
         self.inc_lst = _tex(gpu, len(lst), 1, lst[:, None])
         self.tens = _tex(gpu, n, 1)
 
-        # SDF collision (optional) + dummy 3D texture for sphere mode
+        # SDF collision (optional) + dummy 3D texture for sphere mode.
+        # A collision collection (or >1 collider) always uses the SDF —
+        # a bounding sphere can't represent multiple/compound shapes.
         self.sdf = None
+        self.sdf_track = None    # single rigid collider to offset-track
         sdf_res = 1
-        if (g.collision_shape == 'MESH_SDF' and g.enable_collision
-                and g.collider is not None):
-            self.sdf = _bake_sdf(gpu, obj, g.collider, g.sdf_resolution)
+        colliders = _collect_colliders(g) if g.enable_collision else []
+        self.colliders = colliders
+        want_sdf = colliders and (
+            g.collision_shape == 'MESH_SDF' or len(colliders) > 1
+            or getattr(g, "collider_collection", None) is not None)
+        if want_sdf:
+            self.sdf = _bake_sdf(gpu, obj, colliders, g.sdf_resolution)
             if self.sdf is not None:
                 sdf_res = self.sdf["res"]
+                if len(colliders) == 1:
+                    self.sdf_track = colliders[0]
             else:
-                print("SWF: SDF bake failed (no faces?) — "
+                print("Arachne: SDF bake failed (no faces?) — "
                       "falling back to sphere collision.")
         self._dummy3d = _tex3d(gpu, 1, np.full((1, 1, 1), 1e3, np.float32))
 
@@ -472,7 +522,7 @@ class NativeState:
                                 g.tear_threshold,
                                 1.0 if g.enable_tearing else 0.0))
         sh.uniform_float("p6", (1.0 if g.resist_compression else 0.0,
-                                sdf_on, 0.0, 0.0))
+                                sdf_on, g.stickiness, 0.0))
         sh.uniform_float("p7", (sdf_bmin[0], sdf_bmin[1], sdf_bmin[2],
                                 sdf_delta[0]))
         sh.uniform_float("p8", (sdf_inv[0], sdf_inv[1], sdf_inv[2],
@@ -494,17 +544,19 @@ class NativeState:
         sdf_delta = (0.0, 0.0, 0.0)
         sdf_bmin = (0.0, 0.0, 0.0)
         sdf_inv = (0.0, 0.0, 0.0)
-        coll = g.collider
-        if g.enable_collision and coll is not None:
+        if g.enable_collision and (self.sdf is not None or self.colliders):
             if self.sdf is not None:
-                cur = np.array(obj.matrix_world.inverted()
-                               @ coll.matrix_world.translation)
-                d = cur - self.sdf["bake_loc"]
+                if self.sdf_track is not None:
+                    cur = np.array(obj.matrix_world.inverted()
+                                   @ self.sdf_track.matrix_world.translation)
+                    d = cur - self.sdf["bake_loc"]
+                    sdf_delta = (float(d[0]), float(d[1]), float(d[2]))
+                # else: collection — static, delta stays zero
                 sdf_on = 1.0
-                sdf_delta = (float(d[0]), float(d[1]), float(d[2]))
                 sdf_bmin = tuple(float(x) for x in self.sdf["bmin"])
                 sdf_inv = tuple(float(x) for x in self.sdf["inv_cell"])
-            else:
+            elif self.colliders:
+                coll = self.colliders[0]
                 loc = (obj.matrix_world.inverted()
                        @ coll.matrix_world.translation)
                 s = obj.matrix_world.to_scale()

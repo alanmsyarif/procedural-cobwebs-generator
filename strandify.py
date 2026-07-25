@@ -81,19 +81,20 @@ def _build_group():
     cen2 = h.ma('MULTIPLY', -350, -300, cen.outputs["Value"], 2.0)
     varied = h.ma('MULTIPLY', -200, -300,
                   cen2.outputs["Value"], g["Radius Variation"])
-    plus1 = h.ma('ADD', -50, -300, varied.outputs["Value"], 1.0)
-    radius = h.ma('MULTIPLY', 100, -300,
-                  plus1.outputs["Value"], g["Strand Radius"],
-                  label="strand radius")
+    # per-point curve radius carries only the noise variation (mean 1.0);
+    # the actual strand thickness is the profile circle's radius, driven
+    # by the Strand Radius group input
+    plus1 = h.ma('ADD', -50, -300, varied.outputs["Value"], 1.0,
+                 label="radius variation")
 
     setrad = h.n("GeometryNodeSetCurveRadius", -550, 100)
     h.lk(cres.outputs["Geometry"], setrad.inputs["Curve"])
-    h.lk(radius.outputs["Value"], setrad.inputs["Radius"])
+    h.lk(plus1.outputs["Value"], setrad.inputs["Radius"])
 
     circle = h.n("GeometryNodeCurvePrimitiveCircle", -300, -100,
                  label="profile")
     h.lk(g["Profile Resolution"], circle.inputs["Resolution"])
-    circle.inputs["Radius"].default_value = 0.0015
+    h.lk(g["Strand Radius"], circle.inputs["Radius"])
 
     c2m = h.n("GeometryNodeCurveToMesh", 0, 100)
     h.lk(setrad.outputs["Curve"], c2m.inputs["Curve"])
@@ -454,7 +455,7 @@ def _build_group():
     return nt
 
 
-STRANDIFY_VERSION = 5
+STRANDIFY_VERSION = 6
 
 
 def ensure_strandify_group():
@@ -471,7 +472,7 @@ def ensure_strandify_group():
 def apply_strandify(obj):
     """Add the strandify modifier with silk/dew materials pre-assigned."""
     group = ensure_strandify_group()
-    mod = obj.modifiers.new("SWF Strandify", 'NODES')
+    mod = obj.modifiers.new("Arachne Strandify", 'NODES')
     mod.node_group = group
     for sock_name, mat in (("Silk Material", ensure_silk_material()),
                            ("Dew Material", ensure_dew_material()),
@@ -485,12 +486,12 @@ def apply_strandify(obj):
     return mod
 
 
-class SWF_OT_bake_dew(Operator):
+class ARN_OT_bake_dew(Operator):
     """Bake the dew droplet simulation to disk so renders replay it
     exactly (the render depsgraph can't reuse the viewport's live sim).
     Stepping through the frames also fills the web solver's render
     cache. Save the .blend first — bakes are stored beside it"""
-    bl_idname = "swf.bake_dew"
+    bl_idname = "arachne.bake_dew"
     bl_label = "Bake Dew for Render"
 
     @classmethod
@@ -517,10 +518,10 @@ class SWF_OT_bake_dew(Operator):
         return {'FINISHED'}
 
 
-class SWF_OT_free_dew_bake(Operator):
+class ARN_OT_free_dew_bake(Operator):
     """Delete the baked dew simulation so it simulates live again
     (edit dew settings, then re-bake before rendering)"""
-    bl_idname = "swf.free_dew_bake"
+    bl_idname = "arachne.free_dew_bake"
     bl_label = "Free Dew Bake"
 
     @classmethod
@@ -536,9 +537,9 @@ class SWF_OT_free_dew_bake(Operator):
         return {'FINISHED'}
 
 
-class SWF_OT_add_strandify(Operator):
+class ARN_OT_add_strandify(Operator):
     """Add the strandify modifier (silk tubes + dew) to the active object"""
-    bl_idname = "swf.add_strandify"
+    bl_idname = "arachne.add_strandify"
     bl_label = "Add Strandify"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -551,7 +552,7 @@ class SWF_OT_add_strandify(Operator):
         return {'FINISHED'}
 
 
-classes = (SWF_OT_add_strandify, SWF_OT_bake_dew, SWF_OT_free_dew_bake)
+classes = (ARN_OT_add_strandify, ARN_OT_bake_dew, ARN_OT_free_dew_bake)
 
 
 def _safe_register(cls):

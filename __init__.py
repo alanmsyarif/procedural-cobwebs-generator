@@ -1,5 +1,5 @@
 # ============================================================================
-#  Spider Web Forge v2.2 (Lite) — generator + native GPU solver
+#  Arachne — procedural spider webs with a native GPU solver
 #  ---------------------------------------------------------------------------
 #  * Generator  — orb webs and chaotic spider-spun cobwebs (Pixar / Kole
 #                 construction), pins pre-written into swf_pin
@@ -8,18 +8,18 @@
 #                 collision, friction, tearing, deteriorate, pre-warm
 #  * Strandify  — silk tubes, dripping dew physics, tension heatmap material
 #
-#  QUICK START: (optionally select a collider mesh) -> N-panel > Web Forge
+#  QUICK START: (optionally select a collider mesh) -> N-panel > Arachne
 #  > "Create Web + Sim + Strands" -> play from frame 1.
 #
 #  Blender 4.2+ / 5.x.
 # ============================================================================
 
 bl_info = {
-    "name": "Spider Web Forge",
+    "name": "Arachne",
     "author": "Amsy",
-    "version": (2, 6, 0),
+    "version": (3, 0, 0),
     "blender": (4, 2, 0),
-    "location": "View3D > Sidebar (N) > Web Forge",
+    "location": "View3D > Sidebar (N) > Arachne",
     "description": "Procedural webs with a native-GPU tearing solver, "
                    "silk strandify and dripping dew",
     "category": "Add Mesh",

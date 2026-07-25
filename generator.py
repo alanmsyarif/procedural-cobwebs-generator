@@ -63,11 +63,11 @@ def _live_timer():
     try:
         regenerate_live(context, p)
     except Exception as ex:                     # never break the UI
-        print("Spider Web Forge live update failed:", ex)
+        print("Arachne live update failed:", ex)
     return None
 
 
-class SWF_WebProps(PropertyGroup):
+class ARN_WebProps(PropertyGroup):
     mode: EnumProperty(
         name="Mode",
         items=[('ORB', "Orb Web", "Classic radial/spiral orb web"),
@@ -98,6 +98,21 @@ class SWF_WebProps(PropertyGroup):
         subtype='DISTANCE',
         description="Max distance a spider jumps per step — larger is "
                     "more chaotic, smaller is denser", update=_live_update)
+    cobweb_bridge: FloatProperty(
+        name="Bridge Bias", default=0.5, min=0.0, max=1.0,
+        description="How much the anchor threads commit to spanning "
+                    "gaps: 0 = local/corner webbing hugging each surface, "
+                    "1 = long cables strung between separate pieces of "
+                    "geometry (a bridge). Raise it when the web should "
+                    "hang between floating objects",
+        update=_live_update)
+    cobweb_clump: FloatProperty(
+        name="Clumping", default=0.0, min=0.0, max=1.0,
+        description="Random clumping: spiders are drawn toward a few "
+                    "random attractor spots, knitting dense knots there "
+                    "with sparser spans between — the uneven density of "
+                    "real cobwebs (0 = even, 1 = strong clumps)",
+        update=_live_update)
     radials: IntProperty(
         name="Radials", default=16, min=3, max=64,
         description="Number of radial threads", update=_live_update)
@@ -485,30 +500,82 @@ def _build_cobweb(context, p, env_objs):
         return len(verts) - 1
 
     # ---- initial anchor lines between surfaces ----
+    # Anchor Span sets the target line length, but the ray reach extends
+    # to the whole selected setup so a web can bridge separate / floating
+    # pieces of geometry (e.g. strung between two objects like a bridge),
+    # not only facing surfaces close together.
     span = p.radius * 2.0
+    diag = float(np.linalg.norm(V.max(0) - V.min(0)))
+    bridge = p.cobweb_bridge
+    # bridging wants the ray to cross the whole setup; local webbing
+    # keeps its reach near the anchor span so threads stay short
+    reach = max(span, diag * 1.05) if bridge > 0.0 else span
+    min_len = span * 0.05
+    # at high bias, reject short anchors that hug a single surface so
+    # the web is carried by long spanning cables
+    if bridge > 0.0:
+        min_len = max(min_len, diag * 0.35 * bridge)
+
     attempts = 0
-    while (sum(1 for _ in segs) < p.cobweb_initial
-           and attempts < p.cobweb_initial * 40):
+    budget = p.cobweb_initial * 60
+    while len(segs) < p.cobweb_initial and attempts < budget:
         attempts += 1
         a, na = _sample_surface(rnd, V, T, cum)
-        d = _rand_unit(rnd)
-        if d.dot(na) < 0.0:
-            d = -d                            # keep in outward hemisphere
-        if rnd.random() < 0.5:
-            d = d + na * 1.2                  # half strongly normal-biased
-        d = d / (np.linalg.norm(d) + 1e-12)
-        hit = bvh.ray_cast(Vector(a + na * 1e-4), Vector(d), span)
-        if hit[0] is None:
-            # normals may face the other way (walls, flipped winding):
-            # retry with the normal component of the direction flipped
-            d2 = d - na * (2.0 * d.dot(na))
-            hit = bvh.ray_cast(Vector(a - na * 1e-4), Vector(d2), span)
+        if rnd.random() >= bridge:
+            # (a) outward normal-biased ray — fills corners / concave props
+            d = _rand_unit(rnd)
+            if d.dot(na) < 0.0:
+                d = -d                        # keep in outward hemisphere
+            if rnd.random() < 0.5:
+                d = d + na * 1.2              # half strongly normal-biased
+            d = d / (np.linalg.norm(d) + 1e-12)
+            hit = bvh.ray_cast(Vector(a + na * 1e-4), Vector(d), reach)
+            if hit[0] is None:
+                # normals may face the other way (walls, flipped winding)
+                d2 = d - na * (2.0 * d.dot(na))
+                hit = bvh.ray_cast(Vector(a - na * 1e-4), Vector(d2),
+                                   reach)
+        else:
+            # (b) span toward another surface sample — bridges the gap
+            # between separate pieces of geometry
+            b0, _nb = _sample_surface(rnd, V, T, cum)
+            dvec = b0 - a
+            dl = np.linalg.norm(dvec)
+            if dl < 1e-6:
+                continue
+            dirv = dvec / dl
+            hit = bvh.ray_cast(Vector(a + dirv * 1e-4), Vector(dirv),
+                               reach)
         if hit[0] is None:
             continue
         b = np.asarray(hit[0], dtype=np.float64)
-        if np.linalg.norm(b - a) < span * 0.05:
+        if np.linalg.norm(b - a) < min_len:
             continue
         segs.append([add_vert(a, True), add_vert(b, True)])
+
+    # last resort for very sparse or widely separated geometry: connect
+    # distant surface-point pairs directly, so a bridge web still forms
+    # even when rays through the gap keep missing
+    if bridge > 0.0:
+        need = max(4, int(p.cobweb_initial * (0.25 + 0.75 * bridge)))
+        tries = 0
+        while len(segs) < need and tries < p.cobweb_initial * 20:
+            tries += 1
+            a, _ = _sample_surface(rnd, V, T, cum)
+            b, _ = _sample_surface(rnd, V, T, cum)
+            if np.linalg.norm(b - a) > max(min_len, diag * 0.25):
+                segs.append([add_vert(a, True), add_vert(b, True)])
+
+    # safety net: geometry that no ray could link (fully separate pieces
+    # with Bridge Bias at 0) still gets a few anchors rather than failing
+    tries = 0
+    floor = min(4, p.cobweb_initial)
+    while len(segs) < floor and tries < 400:
+        tries += 1
+        a, _ = _sample_surface(rnd, V, T, cum)
+        b, _ = _sample_surface(rnd, V, T, cum)
+        if np.linalg.norm(b - a) > span * 0.05:
+            segs.append([add_vert(a, True), add_vert(b, True)])
 
     if not segs:
         return None
@@ -527,6 +594,25 @@ def _build_cobweb(context, p, env_objs):
 
     spiders = [spawn_on_thread() for _ in range(p.cobweb_spiders)]
 
+    # random clumping: a few attractor centres pull spiders into dense
+    # local knots, leaving sparser spans between — the uneven density of
+    # real cobwebs. Each spider gravitates toward its assigned centre.
+    clump = p.cobweb_clump
+    clump_centers = []
+    spider_home = [0] * len(spiders)
+    if clump > 0.0:
+        nc = 3 + int(round(clump * 4))
+        for _ in range(nc):
+            ia, ib = segs[rnd.randrange(len(segs))]
+            t = rnd.uniform(0.2, 0.8)
+            clump_centers.append(verts[ia] * (1.0 - t) + verts[ib] * t)
+        spider_home = [rnd.randrange(nc) for _ in range(len(spiders))]
+    clump_p = 0.9 * clump
+
+    def rehome(sj):
+        if clump_centers:
+            spider_home[sj] = rnd.randrange(len(clump_centers))
+
     relocate_every = max(3, int(round(30.0 - 24.0 * p.cobweb_spread)))
     long_jump_p = 0.08 + 0.32 * p.cobweb_spread
     for step in range(p.cobweb_steps):
@@ -537,13 +623,27 @@ def _build_cobweb(context, p, env_objs):
                 and si == 0:
             for sj in range(len(spiders)):
                 spiders[sj] = spawn_on_thread()
+                rehome(sj)
         pi = spiders[si]
         P = verts[pi]
         placed = False
         for _try in range(6):
             jump = p.cobweb_jump * (2.5 if rnd.random() < long_jump_p
                                     else 1.0)
-            Q = P + _rand_unit(rnd) * rnd.uniform(0.15, 1.0) * jump
+            if clump_centers and rnd.random() < clump_p:
+                # head toward the assigned clump centre (with wander), so
+                # spinning knots up there; once close it spins locally
+                toward = clump_centers[spider_home[si]] - P
+                dc = np.linalg.norm(toward)
+                if dc > 1e-6:
+                    bdir = toward / dc + _rand_unit(rnd) * 0.6
+                    bdir = bdir / (np.linalg.norm(bdir) + 1e-12)
+                    step_len = min(jump, dc * rnd.uniform(0.35, 0.95))
+                    Q = P + bdir * max(step_len, jump * 0.15)
+                else:
+                    Q = P + _rand_unit(rnd) * rnd.uniform(0.15, 1.0) * jump
+            else:
+                Q = P + _rand_unit(rnd) * rnd.uniform(0.15, 1.0) * jump
             # blocked by geometry -> land on the surface (new anchor)
             dvec = Q - P
             dist = np.linalg.norm(dvec)
@@ -587,6 +687,7 @@ def _build_cobweb(context, p, env_objs):
             break
         if not placed:
             spiders[si] = spawn_on_thread()  # stuck spider relocates
+            rehome(si)
 
     # ---- to bmesh, with sag + detail subdivision ----
     bm = bmesh.new()
@@ -632,9 +733,9 @@ def _build_cobweb(context, p, env_objs):
     return me, "Cobweb"
 
 
-class SWF_OT_generate_web(Operator):
+class ARN_OT_generate_web(Operator):
     """Generate a natural orb web (anchor endpoints pre-pinned)"""
-    bl_idname = "swf.generate_web"
+    bl_idname = "arachne.generate_web"
     bl_label = "Generate Web"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -655,7 +756,7 @@ class SWF_OT_generate_web(Operator):
         return {'FINISHED'}
 
 
-classes = (SWF_WebProps, SWF_OT_generate_web)
+classes = (ARN_WebProps, ARN_OT_generate_web)
 
 
 def _safe_register(cls):
@@ -680,7 +781,7 @@ def register():
             pass
     for c in classes:
         _safe_register(c)
-    bpy.types.Scene.swf_web = bpy.props.PointerProperty(type=SWF_WebProps)
+    bpy.types.Scene.swf_web = bpy.props.PointerProperty(type=ARN_WebProps)
 
 
 def unregister():

@@ -1,4 +1,4 @@
-# Spider Web Forge
+# Arachne
 
 Procedural spider webs for Blender with a GPU-accelerated tearing physics
 solver. Generate orb webs or chaotic corner cobwebs, simulate them with
@@ -16,7 +16,12 @@ Minimum Blender 5.2 LTS Version
 - **Chaotic Cobweb** spider-spun 3D cobwebs anchored to your scene
   geometry, based on the construction from Pixar's *Dust and Cobwebs for
   Toy Story 4* (SIGGRAPH 2019). Select a corner, prop, or room, and
-  simulated spiders spin threads between the surfaces.
+  simulated spiders spin threads between the surfaces. **Clumping**
+  draws spiders toward a few random attractor spots, knitting dense
+  knots with sparser spans between — the uneven density of real webs.
+  **Bridge Bias** sets how much the anchors commit to spanning gaps:
+  0 = local webbing hugging each surface, 1 = long cables strung
+  between separate/floating pieces of geometry (a bridge).
 
 **Live Update** toggle it on (Generate panel) after generating a web and
 every parameter above rebuilds the web instantly as you drag the
@@ -28,7 +33,12 @@ install)
 - Silk-like unilateral constraints (threads pull, never push)
 - Tension control taut webs or drooping catenaries
 - World-space gravity and wind with turbulence
-- Collision: bounding sphere (fast) or full mesh via baked SDF
+- Collision: bounding sphere (fast) or full mesh via baked SDF, against
+  a single object or an entire **collision collection** (all its meshes
+  merged into one field)
+- **Stickiness**: threads adhere to the collider on contact — a
+  tunable fraction of contacting points latch to the surface so the web
+  drapes and clings instead of sliding off
 - Deteriorate (pre-broken threads) and pre-warm (starts settled)
 - Real-time playback in the viewport
 - Render-safe frame cache: every frame simulated in the viewport is
@@ -51,16 +61,16 @@ install)
 
 ## Installation
 
-1. Download the latest `spider_web_forge_v2.zip` from Releases.
+1. Download the latest `arachne.zip` from Releases.
 2. Blender → Edit → Preferences → Add-ons → Install from Disk.
-3. Enable **Spider Web Forge**. The panel appears in the 3D View sidebar
-   (`N`) under **Web Forge**.
+3. Enable **Arachne**. The panel appears in the 3D View sidebar
+   (`N`) under **Arachne**.
 
 ## Quick start
 
 1. (Optional) select a mesh to act as the collider or, in Chaotic
    Cobweb mode, the geometry the web anchors to.
-2. Web Forge panel → **Create Web + Sim + Strands**.
+2. Arachne panel → **Create Web + Sim + Strands**.
 3. Rewind to frame 1 and press play. Push the collider through the web.
 
 Anchor points are pinned automatically. To change them, enter Edit Mode,

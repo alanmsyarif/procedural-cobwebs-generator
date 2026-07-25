@@ -1,7 +1,7 @@
 # GPU web solver — native Blender GPU backend only (see gpu_native.py for
 # the GLSL kernels and the Pixar/Kole physics notes). A frame-change
 # handler steps the simulation; results are written into mesh attributes
-# and a small "SWF GPU Apply" Geometry Nodes modifier applies positions
+# and a small "Arachne GPU Apply" Geometry Nodes modifier applies positions
 # and deletes torn edges, so Strandify and the tension heatmap consume
 # them unchanged. The base mesh is never modified.
 
@@ -84,7 +84,7 @@ def _on_render_begin(scene, depsgraph=None):
     _RENDERING = True
     if not _RENDER_WARNED:
         _RENDER_WARNED = True
-        print("SWF: render detected — replaying the cached web sim (GPU "
+        print("Arachne: render detected — replaying the cached web sim (GPU "
               "compute can't run on the render thread). Play through the "
               "frame range once in the viewport to fill the cache.")
 
@@ -217,7 +217,7 @@ def enable_gpu_solver(context, obj, collider=None):
     if not any(m.type == 'NODES' and m.node_group
                and m.node_group.name.startswith(GROUP_GPU_APPLY)
                for m in obj.modifiers):
-        mod = obj.modifiers.new("SWF GPU Apply", 'NODES')
+        mod = obj.modifiers.new("Arachne GPU Apply", 'NODES')
         mod.node_group = _ensure_apply_group()
         try:  # apply modifier must precede strandify
             with context.temp_override(object=obj):
@@ -238,7 +238,7 @@ def enable_gpu_solver(context, obj, collider=None):
 #  Properties + operators
 # ---------------------------------------------------------------------------
 
-class SWF_GPUProps(PropertyGroup):
+class ARN_GPUProps(PropertyGroup):
     enabled: BoolProperty(name="Enabled", default=False)
     tension: FloatProperty(
         name="Tension", default=0.8, min=0.0, max=1.0,
@@ -287,16 +287,28 @@ class SWF_GPUProps(PropertyGroup):
         name="Collider", type=bpy.types.Object,
         description="Collision object (sphere approximation or baked "
                     "mesh SDF depending on Shape)")
+    collider_collection: PointerProperty(
+        name="Collider Collection", type=bpy.types.Collection,
+        description="Collide against every mesh in this collection "
+                    "(overrides the single Collider). Always baked as a "
+                    "merged mesh SDF; treated as static — for animated "
+                    "collision use a single Collider object instead")
     collision_offset: FloatProperty(name="Collision Offset", default=0.01,
                                     min=0.0, max=1.0)
     friction: FloatProperty(name="Friction", default=0.5, min=0.0, max=1.0)
+    stickiness: FloatProperty(
+        name="Stickiness", default=0.0, min=0.0, max=1.0,
+        description="How readily threads adhere to the collider on "
+                    "contact: a fraction of contacting points latch to "
+                    "the surface and stay stuck (0 = slide off freely, "
+                    "1 = every contact sticks — the web drapes and clings)")
     seed: IntProperty(name="Seed", default=0, min=0)
 
 
-class SWF_OT_add_gpu_solver(Operator):
+class ARN_OT_add_gpu_solver(Operator):
     """Enable the GPU solver on the active web.
     If another mesh is selected, it becomes the (sphere) collider"""
-    bl_idname = "swf.add_gpu_solver"
+    bl_idname = "arachne.add_gpu_solver"
     bl_label = "Add GPU Solver"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -317,9 +329,9 @@ class SWF_OT_add_gpu_solver(Operator):
         return {'FINISHED'}
 
 
-class SWF_OT_remove_gpu_solver(Operator):
+class ARN_OT_remove_gpu_solver(Operator):
     """Disable the GPU solver and remove its apply modifier"""
-    bl_idname = "swf.remove_gpu_solver"
+    bl_idname = "arachne.remove_gpu_solver"
     bl_label = "Remove GPU Solver"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -339,10 +351,10 @@ class SWF_OT_remove_gpu_solver(Operator):
         return {'FINISHED'}
 
 
-class SWF_OT_reset_gpu(Operator):
+class ARN_OT_reset_gpu(Operator):
     """Rebuild the GPU simulation state (after editing the web,
     changing Tension/Deteriorate, or repinning)"""
-    bl_idname = "swf.reset_gpu"
+    bl_idname = "arachne.reset_gpu"
     bl_label = "Reset GPU Sim"
 
     def execute(self, context):
@@ -353,10 +365,10 @@ class SWF_OT_reset_gpu(Operator):
         return {'FINISHED'}
 
 
-class SWF_OT_pin_vertices(Operator):
+class ARN_OT_pin_vertices(Operator):
     """Write the current Edit Mode vertex selection into the pin
     attribute the GPU solver anchors on"""
-    bl_idname = "swf.pin_vertices"
+    bl_idname = "arachne.pin_vertices"
     bl_label = "Pin Selected"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -397,8 +409,8 @@ class SWF_OT_pin_vertices(Operator):
         return {'FINISHED'}
 
 
-classes = (SWF_GPUProps, SWF_OT_add_gpu_solver, SWF_OT_remove_gpu_solver,
-           SWF_OT_reset_gpu, SWF_OT_pin_vertices)
+classes = (ARN_GPUProps, ARN_OT_add_gpu_solver, ARN_OT_remove_gpu_solver,
+           ARN_OT_reset_gpu, ARN_OT_pin_vertices)
 
 
 def _safe_register(cls):
@@ -427,11 +439,14 @@ def _install_handlers():
 
 
 def _remove_handlers():
+    # match on this add-on's own package name so renaming the installed
+    # folder never orphans handlers (which would double up on re-enable)
+    root = (__package__ or __name__).split(".")[0]
     for list_name, fn in _HANDLERS:
         handlers = getattr(bpy.app.handlers, list_name)
         for h in [h for h in handlers
                   if getattr(h, "__name__", "") == fn.__name__
-                  and "spider_web_forge" in getattr(h, "__module__", "")]:
+                  and root in getattr(h, "__module__", "")]:
             handlers.remove(h)
 
 
@@ -443,7 +458,7 @@ def register():
             pass
     for c in classes:
         _safe_register(c)
-    bpy.types.Object.swf_gpu = PointerProperty(type=SWF_GPUProps)
+    bpy.types.Object.swf_gpu = PointerProperty(type=ARN_GPUProps)
     _install_handlers()
 
 
