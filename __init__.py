@@ -14,14 +14,18 @@
 #  Blender 4.2+ / 5.x.
 # ============================================================================
 
+# Keep `version` and constants.BUILD in step — the first is what Blender's
+# Add-ons list shows, the second is drawn in the N-panel, and comparing the
+# two is how you catch Blender still running a cached older copy.
 bl_info = {
     "name": "Arachne",
     "author": "Amsy",
-    "version": (3, 0, 0),
+    "version": (3, 2, 3),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar (N) > Arachne",
     "description": "Procedural webs with a native-GPU tearing solver, "
-                   "silk strandify and dripping dew",
+                   "silk strandify and dripping dew. Web Shot strands "
+                   "fire in bursts and stay stuck to their emitter",
     "category": "Add Mesh",
 }
 

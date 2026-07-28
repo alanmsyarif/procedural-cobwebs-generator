@@ -107,6 +107,7 @@ def _render_active():
 def _reset_state(obj, g, dt):
     from .gpu_native import NativeState
     st = NativeState(obj, g)
+    st.carry(obj)                    # anchors onto their host before frame 1
     for _ in range(g.pre_warm):      # settle before frame 1 (Kole)
         st.step(obj, g, dt)
     _STATES[obj.name] = st
@@ -145,10 +146,69 @@ def _on_frame(scene, depsgraph=None):
                 st.last_frame = frame
                 _cache_store(obj, frame, st.write_back(obj))
             else:
+                # scrubbing: the sim only advances on consecutive frames, so
+                # the web holds — but anchors are kinematic, so keep them on
+                # the collider/emitter they are stuck to instead of leaving
+                # them behind wherever the last simulated frame put them
                 st.last_frame = frame
-                st.write_back(obj)   # hold current state while scrubbing
+                st.carry(obj)
+                st.write_back(obj)
         except Exception as ex:      # never break playback
             gpu_native._mark_broken(ex)
+
+
+# Dragging the emitter is not a frame change, so _on_frame never fires and
+# the web sits there while the thing it is stuck to walks away. This runs on
+# any interactive edit instead: anchors are re-placed on their host, and
+# with Live Update on a Web Shot is rebuilt outright — where the emitter is
+# decides where every strand starts, which way it flies and what it hits, so
+# moving it is as much a change to the web as any slider.
+_IN_DEPSGRAPH = False
+_SEEN = {}          # object name -> world matrix last acted on
+
+
+def _moved(obj):
+    if obj is None:
+        return False
+    cur = tuple(tuple(r) for r in obj.matrix_world)
+    if _SEEN.get(obj.name) == cur:
+        return False
+    _SEEN[obj.name] = cur
+    return True
+
+
+@persistent
+def _on_depsgraph(scene, depsgraph=None):
+    global _IN_DEPSGRAPH
+    # our own attribute writes tag the mesh, which lands us straight back
+    # here — and rebuilding a web tags plenty more
+    if _IN_DEPSGRAPH or _render_active():
+        return
+    from . import gpu_native
+    if gpu_native.native_broken():
+        return
+    _IN_DEPSGRAPH = True
+    try:
+        p = getattr(scene, "swf_web", None)
+        if (p is not None and p.mode == 'SHOT' and p.live
+                and p.live_obj is not None
+                and (_moved(p.shot_emitter) | _moved(p.shot_aim))):
+            from .generator import schedule_live_update
+            schedule_live_update()
+            return
+        for obj in scene.objects:
+            g = getattr(obj, "swf_gpu", None)
+            if g is None or not g.enabled or obj.type != 'MESH':
+                continue
+            st = _STATES.get(obj.name)
+            if st is None or not st.hosts_moved():
+                continue
+            st.carry(obj)
+            st.write_back(obj)
+    except Exception as ex:
+        gpu_native._mark_broken(ex)
+    finally:
+        _IN_DEPSGRAPH = False
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +273,31 @@ def _ensure_apply_group():
     nt = _build_apply_group()
     nt["swf_version"] = GPU_APPLY_VERSION
     return nt
+
+
+def invalidate_state(obj):
+    """Throw away the simulation bound to `obj`'s previous mesh.
+
+    Live Update swaps a freshly built mesh into the object. The solver only
+    notices by itself when the vertex count changes, so any edit that keeps
+    the topology (Clot, Arc, Slack, Stick To Emitter...) would otherwise go
+    on being simulated — and displayed — from the old bind, and the change
+    would look like it did nothing. Rebinding happens on the next frame."""
+    _STATES.pop(obj.name, None)
+    _CACHE.pop(obj.name, None)
+    g = getattr(obj, "swf_gpu", None)
+    if g is None or not g.enabled or obj.type != 'MESH':
+        return
+    # seed the new mesh's attributes, or the apply modifier reads a missing
+    # position attribute (and collapses the web onto the origin) until the
+    # first simulated frame lands
+    me = obj.data
+    _ensure_attr(me, A_GPU_POS, 'FLOAT_VECTOR', 'POINT')
+    _ensure_attr(me, A_BROKEN, 'BOOLEAN', 'EDGE')
+    _ensure_attr(me, A_TENSION, 'FLOAT', 'POINT')
+    co = np.empty(len(me.vertices) * 3, np.float32)
+    me.vertices.foreach_get("co", co)
+    me.attributes[A_GPU_POS].data.foreach_set("vector", co)
 
 
 def enable_gpu_solver(context, obj, collider=None):
@@ -452,6 +537,7 @@ def _safe_register(cls):
 # (handler list, our function) pairs — render begin/end guard the GPU sim
 _HANDLERS = (
     ("frame_change_post", _on_frame),
+    ("depsgraph_update_post", _on_depsgraph),
     ("render_init", _on_render_begin),
     ("render_complete", _on_render_end),
     ("render_cancel", _on_render_end),

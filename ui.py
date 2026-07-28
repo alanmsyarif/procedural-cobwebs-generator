@@ -1,11 +1,127 @@
 # N-panel UI and the one-click full setup (lite: generator + GPU solver).
 
+import os
+
 import bpy
 from bpy.types import Operator, Panel
 
+from .constants import A_EMIT, A_SHOT, BUILD, P_EMITTER
 from .generator import build_web_object
 from .gpu_solver import enable_gpu_solver, gpu_backend_available
 from .strandify import apply_strandify
+
+_DISK = {"mtime": None, "build": BUILD}
+
+
+def disk_build():
+    """The BUILD string sitting in constants.py on disk, which is not what
+    is running if the files were replaced without reloading scripts —
+    Python holds on to the modules it imported at startup. Comparing the
+    two is the only way to catch that from inside Blender."""
+    path = os.path.join(os.path.dirname(__file__), "constants.py")
+    try:
+        mtime = os.path.getmtime(path)
+        if mtime != _DISK["mtime"]:
+            _DISK["mtime"] = mtime
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith("BUILD"):
+                        _DISK["build"] = line.split("=", 1)[1].strip().strip(
+                            '"').strip("'")
+                        break
+    except Exception:
+        pass
+    return _DISK["build"]
+
+
+class ARN_OT_diagnose(Operator):
+    """Write a report on the active web — which build is loaded, what the
+    solver is bound to, where each burst's muzzle sits — into a text
+    datablock (open it in the Scripting workspace)"""
+    bl_idname = "arachne.diagnose"
+    bl_label = "Diagnose Web"
+
+    def execute(self, context):
+        import sys
+        import numpy as np
+        from . import gpu_native, gpu_solver
+
+        L = []
+        obj = context.object
+        L.append("Arachne build %s" % BUILD)
+        L.append("module: %s" % sys.modules[__name__].__file__)
+        L.append("scene frame: %d" % context.scene.frame_current)
+        if obj is None or obj.type != 'MESH' or not obj.get("swf_web"):
+            L.append("!! active object is not an Arachne web — select the "
+                     "web object and run again")
+        else:
+            me = obj.data
+            g = getattr(obj, "swf_gpu", None)
+            L.append("web: %s  verts=%d  modifiers=%s"
+                     % (obj.name, len(me.vertices),
+                        [m.name for m in obj.modifiers]))
+            L.append("solver enabled: %s   stick_follow: %s   collider: %s"
+                     % (getattr(g, "enabled", None),
+                        getattr(g, "stick_follow", None),
+                        getattr(getattr(g, "collider", None), "name", None)))
+            L.append("mesh binding: %s = %r   %s attribute: %s"
+                     % (P_EMITTER, me.get(P_EMITTER), A_EMIT,
+                        A_EMIT in me.attributes))
+            st = gpu_solver._STATES.get(obj.name)
+            if st is None:
+                L.append("solver state: NONE (never stepped — play forward "
+                         "from the start frame)")
+            else:
+                L.append("solver state: emitter=%s  collider hosts=%s  "
+                         "follow=%s  latch=%s  stepped_to=%s  n=%d"
+                         % (getattr(st.emitter, "name", None),
+                            [o.name for o in st.stick_objs],
+                            st.follow, st.latch, st.last_frame, st.n))
+                try:
+                    w = gpu_native._read(st.posA, st.n, 4)[:, 3]
+                    L.append("pin states: free=%d pinned=%d %s"
+                             % (int((w < 0.5).sum()),
+                                int(np.isclose(w, 1.0).sum()),
+                                "  ".join(
+                                    "ride[%s]=%d" % (o.name,
+                                                     int(np.isclose(w, 2.0 + k)
+                                                         .sum()))
+                                    for k, o in enumerate(st.stick_objs))))
+                except Exception as ex:
+                    L.append("pin states unreadable: %s" % ex)
+            emit = bpy.data.objects.get(me.get(P_EMITTER) or "")
+            if A_EMIT in me.attributes and emit is not None:
+                n = len(me.vertices)
+                mz = np.zeros(n, bool)
+                me.attributes[A_EMIT].data.foreach_get("value", mz)
+                sh = np.zeros(n, np.float32)
+                me.attributes[A_SHOT].data.foreach_get("value", sh)
+                pos = np.empty(n * 3, np.float32)
+                src = ("swf_gpu_pos" if "swf_gpu_pos" in me.attributes
+                       else None)
+                if src:
+                    me.attributes[src].data.foreach_get("vector", pos)
+                else:
+                    me.vertices.foreach_get("co", pos)
+                pos = pos.reshape(-1, 3)
+                E = np.array(obj.matrix_world.inverted_safe()
+                             @ emit.matrix_world.translation)
+                L.append("muzzles: %d, distance to %s right now:"
+                         % (int(mz.sum()), emit.name))
+                for f in sorted(set(np.round(sh[mz]))):
+                    i = int(np.flatnonzero(mz & (np.round(sh) == f))[0])
+                    L.append("   fired frame %7.1f -> %.3f m"
+                             % (f, float(np.linalg.norm(pos[i] - E))))
+
+        text = "\n".join(L)
+        print(text)
+        name = "Arachne Diagnostic"
+        txt = bpy.data.texts.get(name) or bpy.data.texts.new(name)
+        txt.clear()
+        txt.write(text)
+        self.report({'INFO'},
+                    "Written to Text block '%s' (Scripting workspace)" % name)
+        return {'FINISHED'}
 
 
 class ARN_OT_full_setup(Operator):
@@ -31,9 +147,11 @@ class ARN_OT_full_setup(Operator):
                         "mesh geometry to anchor to, Web Shot needs at "
                         "least one valid shot.")
             return {'CANCELLED'}
-        # this web gets a solver + strandify — don't let Live Update
-        # rebuild it (that would change topology under the solver)
-        context.scene.swf_web.live_obj = None
+        # Live Update keeps tracking this web: rebuilding it now drops the
+        # simulation bound to the old mesh and rebinds on the next frame
+        # (see gpu_solver.invalidate_state), so tweaking a slider after the
+        # full setup actually shows up instead of being simulated away
+        context.scene.swf_web.live_obj = obj
         if gpu_backend_available():
             enable_gpu_solver(context, obj, collider)
         else:
@@ -43,6 +161,53 @@ class ARN_OT_full_setup(Operator):
         apply_strandify(obj)
         self.report({'INFO'}, "Web ready — play from frame 1.")
         return {'FINISHED'}
+
+
+def _draw_shot_status(col, context, p):
+    """Everything that decides whether a Web Shot sticks to its emitter,
+    stated on the panel. Each of these has been the answer at some point,
+    and none of them is visible anywhere else."""
+    from . import gpu_solver
+
+    box = col.box()
+    box.scale_y = 0.8
+    disk = disk_build()
+    if disk != BUILD:
+        box.label(text="RELOAD SCRIPTS: running %s, on disk %s"
+                       % (BUILD, disk), icon='ERROR')
+
+    ob = context.object
+    if (ob is None or ob.type != 'MESH' or not ob.get("swf_web")
+            or ob.data.attributes.get(A_SHOT) is None):
+        box.label(text="Select the web to see its status.", icon='INFO')
+        return
+
+    me = ob.data
+    bound = me.get(P_EMITTER)
+    if p.shot_emitter is None:
+        box.label(text="No emitter set.", icon='INFO')
+    elif bound is None or A_EMIT not in me.attributes:
+        box.label(text="Not bound — press Generate Web", icon='ERROR')
+    elif bound not in bpy.data.objects:
+        box.label(text="Bound to '%s', which no longer exists" % bound,
+                  icon='ERROR')
+    else:
+        box.label(text="Stuck to: %s" % bound, icon='CHECKMARK')
+
+    g = getattr(ob, "swf_gpu", None)
+    if g is None or not g.enabled:
+        box.label(text="GPU solver off — Stick To Emitter needs it",
+                  icon='ERROR')
+    else:
+        st = gpu_solver._STATES.get(ob.name)
+        if st is None:
+            box.label(text="Solver idle — play forward a frame", icon='INFO')
+        else:
+            box.label(text="Solver: frame %s, %s"
+                           % (st.last_frame,
+                              "anchored" if st.emitter is not None
+                              else "no anchors bound"),
+                      icon='PLAY' if st.emitter is not None else 'ERROR')
 
 
 class ARN_PT_main(Panel):
@@ -77,8 +242,15 @@ class ARN_PT_main(Panel):
         elif p.mode == 'SHOT':
             col.prop(p, "shot_emitter")
             col.prop(p, "shot_aim")
+            row = col.row()
+            row.enabled = p.shot_emitter is not None
+            row.prop(p, "shot_stick_emitter")
             col.separator()
             col.prop(p, "shot_count")
+            col.prop(p, "shot_bursts")
+            row = col.row()
+            row.enabled = p.shot_bursts > 1
+            row.prop(p, "shot_burst_gap")
             col.prop(p, "shot_start")
             col.prop(p, "shot_interval")
             col.prop(p, "shot_speed")
@@ -103,6 +275,7 @@ class ARN_PT_main(Panel):
             col.label(text="Select what the shots hit.", icon='INFO')
             col.label(text="Shots fly once the solver or strands are on.",
                       icon='INFO')
+            _draw_shot_status(col, context, p)
         else:
             col.prop(p, "radials")
             col.prop(p, "rings")
@@ -192,9 +365,12 @@ class ARN_PT_main(Panel):
 
         col = layout.column(align=True)
         col.label(text="Play from frame 1 to simulate.", icon='INFO')
+        row = col.row(align=True)
+        row.label(text="Build %s" % BUILD)
+        row.operator("arachne.diagnose", text="", icon='CONSOLE')
 
 
-classes = (ARN_OT_full_setup, ARN_PT_main)
+classes = (ARN_OT_full_setup, ARN_OT_diagnose, ARN_PT_main)
 
 
 def _safe_register(cls):

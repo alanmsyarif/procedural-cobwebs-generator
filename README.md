@@ -29,7 +29,12 @@ Minimum Blender 5.2 LTS Version
   free end that whips). The emitter's animated location is sampled per
   shot, so a moving hand leaves each strand anchored where it fired;
   point an **Aim Target** at something to fire at it, or leave both
-  empty to spray from the 3D cursor in all directions. Where a shot
+  empty to spray from the 3D cursor in all directions. An Aim Target is
+  always part of the hit test, selected or not, and it sets the range:
+  shots reach it however far away it is, and the ones the spread throws
+  wide stop level with it instead of sailing past — so nothing runs
+  through the thing being shot at. Silk that the lob or the clot would
+  otherwise bury in a surface is lifted back out of it. Where a shot
   lands it splays into an **impact splat**: radial filaments sprayed
   across the surface, forked and knitted together, tips stuck down and
   wrapping over corners. **Cross Threads** string silk between shots
@@ -37,9 +42,31 @@ Minimum Blender 5.2 LTS Version
   strands are frozen by the solver until their shot goes off, so nothing
   has sagged before it flies.
 
+  The emitter fires more than once: **Bursts** volleys of **Shots**
+  each, **Burst Gap** frames apart, every volley built from the
+  emitter's location at the moment it goes off with its own clot,
+  lashing and cross threads so a moving hand leaves a separate web per
+  shot instead of one smeared fan. **Stick To Emitter** anchors the
+  muzzle end to the emitter itself, the same way an impact point sticks
+  to the geometry it hit: from the frame a strand fires, its near end is
+  carried along as the emitter moves and turns, so the silk trails the
+  hand that shot it (GPU solver; needs no collider).
+
 **Live Update** toggle it on (Generate panel) after generating a web and
 every parameter above rebuilds the web instantly as you drag the
 sliders dial in the look in realtime, then add the solver and strands.
+Moving the Emitter or the Aim Target counts as a change too — where the
+emitter is decides where every strand starts, which way it flies and what
+it hits — so dragging either one in the viewport rebuilds the Web Shot on
+the spot. With Live Update off, the solver still keeps the muzzle anchors
+on the emitter as you drag it.
+Rebuilding a web that already has the solver on it restarts the
+simulation from the new mesh at the current frame (otherwise the old
+simulation would keep overwriting the display and the change would look
+like it did nothing). Muzzle anchors are placed straight from the
+emitter, so they land on it whatever frame you are on — but the rest of
+the silk starts from its built pose, so play from frame 1 once the look
+is dialled in.
 
 **GPU physics solver** (built on Blender's native GPU module nothing to
 install)
@@ -111,6 +138,18 @@ select vertices, and use **Pin / Unpin** in the panel.
   along with Tension 0.95 — slack silk sags off the wall it just stuck
   to) so the first shots are not already settled at frame 1, and play
   from frame 1: the reveal is driven by the current frame, not the sim.
+- A clot that unravels a few seconds after it fires is tearing, not the
+  Clot settings: the cord is built to Clot Thickness for every burst, but
+  once the strands' own segments snap the bundle spreads. The oldest
+  burst goes first because it has hung the longest. Raise **Tear
+  Threshold** (1.5 -> 4-6) or turn Enable Tearing off, and/or lower
+  Tension so the silk carries slack instead of stretching to the limit.
+- Web trailing a moving hand: keyframe the Emitter, leave **Stick To
+  Emitter** on and play from frame 1. A muzzle holds its built pose until
+  its own shot fires, then sits on the emitter from that frame on — it is
+  placed from the emitter's location rather than simulated, so scrubbing,
+  jumping and dropped frames all put it in the right place. The silk
+  hanging off it still needs the frames played through.
 - A single splat on a wall, as in the reference: Shots 1, Spread 0°,
   Shot Speed ~20, an Emitter and an Aim Target, Splat Size to taste. The
   surface being shot at should NOT be the solver's Collider — its

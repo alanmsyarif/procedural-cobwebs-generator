@@ -28,7 +28,7 @@ from bpy.props import (
 )
 from bpy.types import Operator, PropertyGroup
 
-from .constants import A_PIN, A_SHOT, A_NOTEAR
+from .constants import A_PIN, A_SHOT, A_NOTEAR, A_EMIT, P_EMITTER
 
 
 # A property `update` callback runs in a restricted context where editing
@@ -45,6 +45,20 @@ def _live_update(self, context):
     if _LIVE_PENDING:
         return
     p = getattr(context.scene, "swf_web", None)
+    if p is None or not p.live or p.live_obj is None:
+        return
+    _LIVE_PENDING = True
+    bpy.app.timers.register(_live_timer, first_interval=0.0)
+
+
+def schedule_live_update():
+    """Ask for a live rebuild from outside a property callback — moving the
+    emitter or the aim target changes the web just as much as any slider
+    does. Coalesced through the same one-shot timer."""
+    global _LIVE_PENDING
+    if _LIVE_PENDING:
+        return
+    p = getattr(bpy.context.scene, "swf_web", None)
     if p is None or not p.live or p.live_obj is None:
         return
     _LIVE_PENDING = True
@@ -129,9 +143,26 @@ class ARN_WebProps(PropertyGroup):
         description="Fire toward this object. Unset = the emitter's local "
                     "-Z axis; with no emitter either, shots spray in all "
                     "directions", update=_live_update)
+    shot_stick_emitter: BoolProperty(
+        name="Stick To Emitter", default=True,
+        description="The muzzle end stays attached to the emitter and is "
+                    "carried along as it moves and turns — the same way an "
+                    "impact point sticks to the geometry it hit — so the "
+                    "web trails a moving hand instead of hanging in the air "
+                    "where it fired. GPU solver only",
+        update=_live_update)
     shot_count: IntProperty(
         name="Shots", default=14, min=1, max=400,
-        description="Number of strands fired", update=_live_update)
+        description="Number of strands fired per burst", update=_live_update)
+    shot_bursts: IntProperty(
+        name="Bursts", default=1, min=1, max=50,
+        description="How many times the emitter fires. Each burst is a "
+                    "fresh volley of Shots, sampled at the emitter's "
+                    "location at that moment", update=_live_update)
+    shot_burst_gap: FloatProperty(
+        name="Burst Gap", default=24.0, min=0.0, max=2000.0,
+        description="Frames between the start of one burst and the next",
+        update=_live_update)
     shot_start: IntProperty(
         name="First Shot Frame", default=1, min=0,
         description="Frame the first strand leaves the emitter",
@@ -149,8 +180,10 @@ class ARN_WebProps(PropertyGroup):
         name="Range", default=12.0, min=0.1, max=500.0, subtype='DISTANCE',
         description="How far a strand flies before giving up. A shot that "
                     "hits nothing within range keeps a free, unpinned end. "
-                    "An Aim Target farther away than this is still reached "
-                    "— the range is stretched to cover it",
+                    "Ignored while an Aim Target is set: the range then "
+                    "follows the distance to the target, so shots reach it "
+                    "however far it is and the ones the spread throws wide "
+                    "stop level with it instead of sailing past",
         update=_live_update)
     shot_spread: FloatProperty(
         # ANGLE properties are stored in radians and only displayed in
@@ -328,6 +361,9 @@ def regenerate_live(context, p):
     old = obj.data
     obj.data = me
     me.name = name
+    # the running simulation belongs to the mesh that was just replaced
+    from .gpu_solver import invalidate_state
+    invalidate_state(obj)
     if old.users == 0:
         try:
             bpy.data.meshes.remove(old)
@@ -846,8 +882,10 @@ def _build_cobweb(context, p, env_objs):
 #  reaches it (A_SHOT); Strandify's Shot Reveal culls points that haven't
 #  been reached yet, so a strand visibly grows out to its impact point at
 #  Shot Speed. The muzzle end is pinned where the emitter was when it
-#  fired; the tip is pinned only if it hit geometry — a miss leaves a free
-#  end that whips under the solver.
+#  fired — and, with Stick To Emitter, marked A_EMIT so the GPU solver
+#  carries it along with the emitter from that frame on; the tip is pinned
+#  only if it hit geometry — a miss leaves a free end that whips under the
+#  solver. The whole thing repeats Bursts times, Burst Gap frames apart.
 # ============================================================================
 
 def _action_fcurves(obj):
@@ -912,17 +950,25 @@ def _cone_dir(rnd, axis, half_angle):
 def _build_shot(context, p, env_objs):
     from mathutils import Vector
 
-    env_objs = [o for o in env_objs
-                if o.type == 'MESH' and not o.get("swf_web")]
-    env = _env_data(context, env_objs) if env_objs else None
-    bvh = env[0] if env is not None else None
-
     rnd = random.Random(p.seed)
     scene = context.scene
     fps = scene.render.fps / max(scene.render.fps_base, 1e-6)
     speed = max(p.shot_speed, 1e-3)
     emit, aim = p.shot_emitter, p.shot_aim
     cursor = np.asarray(scene.cursor.location, dtype=np.float64)
+
+    # What the shots can hit. The Aim Target joins the selection whether or
+    # not it was selected — a shot fired at something has to stop on it
+    # rather than pass through — and the emitter is taken out, since silk
+    # leaving a hand should not immediately stick to that hand.
+    env_objs = [o for o in env_objs
+                if o.type == 'MESH' and not o.get("swf_web")]
+    if (aim is not None and aim.type == 'MESH' and aim not in env_objs
+            and not aim.get("swf_web")):
+        env_objs.append(aim)
+    env_objs = [o for o in env_objs if o is not emit]
+    env = _env_data(context, env_objs) if env_objs else None
+    bvh = env[0] if env is not None else None
 
     # a mesh Aim Target is shot at all over, not just at its origin
     aim_surf = None
@@ -941,13 +987,34 @@ def _build_shot(context, p, env_objs):
         if np.linalg.norm(a0) > 1e-9:
             axis0 = a0 / np.linalg.norm(a0)
 
-    verts, times, segs, pinned = [], [], [], set()
+    def outside(co, clear=8e-3):
+        """Lift a point back out of whatever it landed inside.
 
-    def add_vert(co, t, pin=False):
+        Silk is laid out analytically — lobbed, whipped, sagging — with no
+        idea the target is in the way, so spans near an impact and cross
+        threads strung between two landed tips end up buried in the surface.
+        Nearest-surface tells us how far in; the normal takes it back out."""
+        if bvh is None:
+            return co
+        near = bvh.find_nearest(Vector(co))
+        if near[0] is None:
+            return co
+        surf = np.asarray(near[0], dtype=np.float64)
+        nrm = np.asarray(near[1], dtype=np.float64)
+        if float(np.dot(co - surf, nrm)) < clear:
+            return surf + nrm * clear
+        return co
+
+    verts, times, segs, pinned = [], [], [], set()
+    muzzles = set()                 # anchors that ride the emitter
+
+    def add_vert(co, t, pin=False, muzzle_end=False):
         verts.append(np.asarray(co, dtype=np.float64))
         times.append(float(t))
         if pin:
             pinned.add(len(verts) - 1)
+        if muzzle_end:
+            muzzles.add(len(verts) - 1)
         return len(verts) - 1
 
     def add_splat(hub, center, normal, arrive):
@@ -1022,363 +1089,403 @@ def _build_shot(context, p, env_objs):
     # clamped: a .blend saved before Spread's bounds were corrected to
     # radians can still hold a huge value
     half = min(max(p.shot_spread, 0.0), math.pi) * 0.5
-    strands = []                    # per shot: (vertex indices, arrival frames)
 
-    # ---- pass 1: where every shot starts, aims and lands ------------------
-    fired = []
-    for i in range(p.shot_count):
-        fire = p.shot_start + i * p.shot_interval
-        if p.shot_interval > 0.0:
-            fire += rnd.uniform(-0.35, 0.35) * p.shot_interval * p.jitter
-            fire = max(fire, float(p.shot_start))   # never before the start
-        muzzle = _obj_loc_at(emit, fire)
-        if muzzle is None:
-            muzzle = cursor
+    # The emitter fires Bursts volleys of Shots each, Burst Gap frames
+    # apart. Every volley is built on its own: its own clot, its own
+    # lashing and its own cross threads, from the emitter's location at the
+    # moment it goes off — so a moving hand leaves a separate web behind
+    # per shot rather than one fan smeared along its path.
+    for burst in range(max(p.shot_bursts, 1)):
+        b_start = float(p.shot_start) + burst * p.shot_burst_gap
+        strands = []            # (vertex indices, arrival frames, angle)
 
-        reach = p.shot_range
-        if aim is not None:
-            # spread the burst over the target's surface instead of
-            # converging every strand on its origin — a bundle of lines all
-            # through one point is what reads as "fired by a machine"
-            if aim_surf is not None:
-                pnt, _n = _sample_surface(rnd, aim_surf[1], aim_surf[2],
-                                          aim_surf[3])
-                tgt = pnt + (_obj_loc_at(aim, fire) - aim_now)
+        # ---- pass 1: where every shot starts, aims and lands ---------
+        fired = []
+        for i in range(p.shot_count):
+            fire = b_start + i * p.shot_interval
+            if p.shot_interval > 0.0:
+                fire += rnd.uniform(-0.35, 0.35) * p.shot_interval * p.jitter
+                fire = max(fire, b_start)   # never before the burst starts
+            muzzle = _obj_loc_at(emit, fire)
+            if muzzle is None:
+                muzzle = cursor
+
+            reach = p.shot_range
+            if aim is not None:
+                # spread the burst over the target's surface instead of
+                # converging every strand on its origin — a bundle of
+                # lines all through one point is what reads as "fired
+                # by a machine"
+                if aim_surf is not None:
+                    pnt, _n = _sample_surface(rnd, aim_surf[1], aim_surf[2],
+                                              aim_surf[3])
+                    tgt = pnt + (_obj_loc_at(aim, fire) - aim_now)
+                else:
+                    tgt = _obj_loc_at(aim, fire)
+                d = tgt - muzzle
+                dl = float(np.linalg.norm(d))
+                axis = d / dl if dl > 1e-9 else _rand_unit(rnd)
+                # Range adapts to the target: far enough to reach it (Range
+                # on its own strands every shot in mid-air whenever the
+                # target sits farther away), and no farther, so the ones the
+                # spread throws wide stop level with it instead of sailing
+                # metres past. `over` covers the target's own depth — the
+                # sampled point can be on its near face while the shot flies
+                # at the far one.
+                over = 1.15 + min(max(p.shot_spread, 0.0), math.pi) * 0.25
+                reach = dl * over
+            elif axis0 is not None:
+                axis = axis0
             else:
-                tgt = _obj_loc_at(aim, fire)
-            d = tgt - muzzle
-            dl = float(np.linalg.norm(d))
-            axis = d / dl if dl > 1e-9 else _rand_unit(rnd)
-            # aiming at something means reaching it: Range on its own would
-            # strand every shot in mid-air whenever the target sits farther
-            # away than it. Range still bounds shots that miss.
-            reach = max(reach, dl * 1.25)
-        elif axis0 is not None:
-            axis = axis0
-        else:
-            axis = _rand_unit(rnd)   # no emitter, no target: spray outward
-        dirv = _cone_dir(rnd, axis, half)
+                axis = _rand_unit(rnd)   # no emitter, no target: spray outward
+            dirv = _cone_dir(rnd, axis, half)
 
-        hit = (bvh.ray_cast(Vector(muzzle + dirv * 1e-4), Vector(dirv),
-                            reach)
-               if bvh is not None else (None, None, None, None))
-        if hit[0] is not None:
-            hit_n = np.asarray(hit[1], dtype=np.float64)
-            end = np.asarray(hit[0], dtype=np.float64) + hit_n * 2e-3
-            stick = True
-        else:
-            hit_n = None
-            end = muzzle + dirv * p.shot_range
-            stick = False
-
-        L = float(np.linalg.norm(end - muzzle))
-        if L < 1e-4:
-            continue
-        fired.append((fire, muzzle, dirv, end, stick, hit_n, L))
-
-    if not fired:
-        return None
-
-    # ---- the clot ---------------------------------------------------------
-    # The burst leaves as one mass of web fluid and only opens into separate
-    # strands partway to the target, so every strand rides a shared path
-    # first and blends out to its own line after that.
-    clot = min(max(p.shot_clot, 0.0), 0.95)
-    mu_c = np.mean([f[1] for f in fired], axis=0)
-    ax_c = np.sum([f[2] for f in fired], axis=0)
-    nax = float(np.linalg.norm(ax_c))
-    ax_c = ax_c / nax if nax > 1e-9 else fired[0][2]
-    L_c = float(np.mean([f[6] for f in fired]))
-    up_c = np.array([0.0, 0.0, 1.0]) - ax_c * float(ax_c[2])
-    nu_c = float(np.linalg.norm(up_c))
-    up_c = up_c / nu_c if nu_c > 1e-6 else np.cross(ax_c,
-                                                    np.array([1.0, 0.0, 0.0]))
-    arc_c = p.shot_arc * L_c * 0.35
-    # the clot has volume: each strand sits at its own spot inside the mass
-    clot_r = p.shot_clot_size
-    e1_c, e2_c = up_c, np.cross(ax_c, up_c)
-    # the rope meanders as a unit — shared by every strand, so the bundle
-    # snakes instead of running dead straight like a cable
-    mean_amp = L_c * (0.015 + 0.03 * p.shot_whip)
-    waves_c = [[(rnd.uniform(0.5, 2.2), rnd.uniform(0.0, 2.0 * math.pi),
-                 rnd.uniform(-1.0, 1.0)) for _ in range(2)]
-               for _axis in range(2)]
-    twist = p.shot_clot_twist * 2.0 * math.pi
-    # clot_s = last segment still fully balled up (opened() is 0 there).
-    # Lashing stops at it: one segment further the strands have already
-    # begun to separate, and a binder thread there would span metres and
-    # haul the opening fan back together.
-    clot_s = max(0, min(nseg - 1, int(clot * nseg)))
-    open_s = min(nseg - 1, clot_s + 1)
-
-    def opened(t):
-        """0 while the shots are still balled together, easing to 1 (fully
-        on their own lines) by the time they land."""
-        if t <= clot:
-            return 0.0
-        x = (t - clot) / max(1.0 - clot, 1e-6)
-        return x * x * (3.0 - 2.0 * x)
-
-    def rope(t, lob):
-        """Centre line of the travelling clot."""
-        mean = sum(amp * math.sin(math.pi * t * freq + ph)
-                   for freq, ph, amp in waves_c[0]) * 0.5
-        mean2 = sum(amp * math.sin(math.pi * t * freq + ph)
-                    for freq, ph, amp in waves_c[1]) * 0.5
-        env = math.sin(math.pi * min(t / max(clot, 1e-6), 1.0) ** 0.7)
-        return (mu_c + ax_c * (t * L_c) + up_c * (lob * arc_c)
-                + e1_c * (mean * mean_amp * env)
-                + e2_c * (mean2 * mean_amp * env))
-
-    # ---- pass 2: build the strands ---------------------------------------
-    for fire, muzzle, dirv, end, stick, hit_n, L in fired:
-        flight = (L / speed) * fps           # frames the tip is airborne
-        # where this strand sits in the rope's cross-section, and how its
-        # braid is phased — sqrt keeps the mass evenly filled
-        c_rad = clot_r * math.sqrt(rnd.random())
-        c_ph = rnd.uniform(0.0, 2.0 * math.pi)
-        # fibres in a real bundle wander in and out, touching and parting
-        # again along its length instead of holding a fixed spacing
-        f_freq, f_ph = rnd.uniform(1.5, 4.5), rnd.uniform(0.0, 2.0 * math.pi)
-
-        # the lash: a perpendicular basis per strand carrying a few waves
-        # of different frequency, so shots read as thrown silk rather than
-        # laser lines. Both ends are held by the sin(pi t) envelope.
-        u = np.cross(dirv, _rand_unit(rnd))
-        u = (u / np.linalg.norm(u) if np.linalg.norm(u) > 1e-9
-             else _rand_unit(rnd))
-        w = np.cross(dirv, u)
-        waves = [[(rnd.uniform(0.6, 3.2), rnd.uniform(0.0, 2.0 * math.pi),
-                   rnd.uniform(-1.0, 1.0)) for _ in range(3)]
-                 for _axis in range(2)]
-        # each strand leans its own way, so a burst fans out in flight
-        bow_u, bow_w = rnd.uniform(-1.0, 1.0), rnd.uniform(-1.0, 1.0)
-
-        # the lob: world-up component perpendicular to the flight line, so
-        # the strand rides over the straight path and drops onto the hit
-        upw = np.array([0.0, 0.0, 1.0]) - dirv * float(dirv[2])
-        nu = float(np.linalg.norm(upw))
-        upw = upw / nu if nu > 1e-6 else u
-        arc_h = p.shot_arc * L * 0.35 * rnd.uniform(0.75, 1.25)
-        hook = rnd.uniform(-1.0, 1.0)
-
-        def wander(t, axis):
-            v = sum(amp * math.sin(math.pi * t * freq + ph)
-                    for freq, ph, amp in waves[axis])
-            return v / 3.0
-
-        idx, arrive = [], []
-        for s in range(nseg + 1):
-            t = s / nseg
-            # t**1.8 skews the lob's peak to ~0.68 of the way out: shallow
-            # off the muzzle, steep climb, then the drop onto the hit
-            lob = math.sin(math.pi * t ** 1.8)
-            own = muzzle + (end - muzzle) * t
-            if 0 < s < nseg:                 # never shift the two anchors
-                own = own + upw * (lob * arc_h) \
-                          + u * (lob * arc_h * 0.3 * hook)
-                env = math.sin(math.pi * t) * p.shot_whip * L * 0.12
-                own = own + u * (env * (wander(t, 0) + bow_u * 0.6)) \
-                          + w * (env * (wander(t, 1) + bow_w * 0.6))
-                own[2] -= math.sin(math.pi * t) * L * p.shot_slack
-                own += (np.array([rnd.uniform(-1, 1) for _ in range(3)])
-                        * p.jitter * 0.01 * L)
-            b = 1.0 if s == nseg else opened(t)
-            if b < 1.0:
-                # still (partly) inside the travelling clot: braided round
-                # the rope's axis, with the bundle swelling and pinching
-                # along its length so it reads knotted rather than spun
-                aa = c_ph + twist * t
-                bulge = 1.0 + 0.4 * math.sin(math.pi * t * 3.0 + c_ph)
-                fib = 1.0 + 0.55 * math.sin(f_freq * math.pi * t + f_ph)
-                off = (e1_c * math.cos(aa) + e2_c * math.sin(aa)) \
-                    * (c_rad * bulge * fib)
-                co = (rope(t, lob) + off) * (1.0 - b) + own * b
+            hit = (bvh.ray_cast(Vector(muzzle + dirv * 1e-4), Vector(dirv),
+                                reach)
+                   if bvh is not None else (None, None, None, None))
+            if hit[0] is not None:
+                hit_n = np.asarray(hit[1], dtype=np.float64)
+                end = np.asarray(hit[0], dtype=np.float64) + hit_n * 2e-3
+                stick = True
             else:
-                co = own
-            pin = (s == 0) or (s == nseg and stick)
-            at = fire + flight * t
-            idx.append(add_vert(co, at, pin))
-            arrive.append(at)
-            if s:
-                segs.append([idx[-2], idx[-1]])
-        # angle around the burst axis, so "neighbouring" strands are known
-        # and ring threads can be strung between them
-        e2 = np.cross(ax_c, up_c)
-        ang_c = math.atan2(float(np.dot(dirv, e2)), float(np.dot(dirv, up_c)))
-        strands.append((idx, arrive, ang_c))
-        if stick:
-            add_splat(idx[-1], end, hit_n, arrive[-1])
+                hit_n = None
+                # `reach`, not Range: with an Aim Target the reach is what
+                # the target's distance allows, and a miss that ignored it
+                # sailed the full Range straight through the target
+                end = muzzle + dirv * reach
+                stick = False
 
-    # ---- webbing ----------------------------------------------------------
-    # The strands are the radials; this knits them into something that
-    # reads as a spider web rather than a fan of parallel curves:
-    #   * ring threads run between angularly neighbouring strands at a
-    #     similar distance out, the concentric pass of a real orb web
-    #   * bridge threads hop to whichever strand is actually nearest,
-    #     sometimes chaining on to a third — the irregular part
-    # Nothing is strung inside the clot: while the burst is still one mass
-    # a cross thread would just be a chord through overlapping strands, and
-    # those repeated chords are what made the geometry look stamped out.
-    def link(va, vb, extra=0.0):
-        """Silk between two existing points, sagging under its own weight.
-        Born once both ends exist."""
-        A, B = verts[va], verts[vb]
-        span = float(np.linalg.norm(B - A))
-        if span < 1e-4:
-            return
-        born = max(times[va], times[vb]) + extra
-        sub = max(p.detail, 1) + 1
-        droop = span * max(p.shot_slack, 0.04) * rnd.uniform(0.6, 2.2)
-        prev = va
-        inner = []
-        for s in range(1, sub):
-            t = s / sub
-            co = A + (B - A) * t
-            co[2] -= math.sin(math.pi * t) * droop
-            co += (np.array([rnd.uniform(-1, 1) for _ in range(3)])
-                   * p.jitter * 0.03 * span)
-            ni = add_vert(co, born)
-            segs.append([prev, ni])
-            prev = ni
-            inner.append(ni)
-        segs.append([prev, vb])
-        # loose fibres trailing off the thread — every junction in a real
-        # web frays, and it is most of what makes one read as silk
-        if inner and rnd.random() < 0.4:
-            root = rnd.choice(inner)
-            d = _rand_unit(rnd) * span * rnd.uniform(0.06, 0.22)
-            prev2 = root
-            for k in range(2):
-                co = verts[root] + d * ((k + 1) * 0.5)
-                co[2] -= span * 0.015 * (k + 1)
-                nv = add_vert(co, times[root])
-                segs.append([prev2, nv])
-                prev2 = nv
-
-    # ---- rope: lash the clot together -------------------------------------
-    # Bunching the strands at build time is not enough — once the solver
-    # runs, gravity and the constraints pull them apart into a ribbon. Short
-    # binder threads between neighbours at every clot segment (plus a few
-    # chords across the bundle) hold the mass together as one rope, and
-    # since silk only pulls they never push the strands apart.
-    binders = []          # edges the solver must not tear
-    if len(strands) > 1 and clot_s > 1:
-        ring = sorted(range(len(strands)), key=lambda k: strands[k][2])
-
-        # Whipping: threads spiralling around the outside of the bundle,
-        # tied to whichever fibre they pass. This is how silk (and rope)
-        # actually holds together, and it reads as one cord. A ladder of
-        # straight rungs between neighbours binds just as well but renders
-        # as the cross-bars of a cable harness.
-        for _wi in range(max(2, len(strands) // 6)):
-            ph = rnd.uniform(0.0, 2.0 * math.pi)
-            turns = p.shot_clot_twist + rnd.uniform(1.5, 4.0)
-            rad_k = rnd.uniform(1.02, 1.3)
-            prev = None
-            for s in range(0, clot_s + 1):
-                t = s / nseg
-                aa = ph + turns * 2.0 * math.pi * (t / max(clot, 1e-6))
-                lob = math.sin(math.pi * t ** 1.8)
-                co = rope(t, lob) + (e1_c * math.cos(aa)
-                                     + e2_c * math.sin(aa)) * (clot_r * rad_k)
-                born = times[strands[ring[0]][0][s]]
-                vi = add_vert(co, born, s == 0)
-                if prev is not None:
-                    segs.append([prev, vi])
-                prev = vi
-                # bite onto the nearest fibre — that tie is what binds
-                if s % 2 == 0:
-                    best, bd = None, 1e18
-                    for a in ring:
-                        va = strands[a][0][s]
-                        d = float(np.linalg.norm(verts[va] - co))
-                        if d < bd:
-                            best, bd = va, d
-                    if best is not None:
-                        segs.append([vi, best])
-                        binders.append((vi, best))
-
-        # Ties between neighbouring fibres at every station. These are what
-        # actually holds the cord: they are short, so radial separation
-        # stretches them immediately. Diagonal ties along the bundle look
-        # nicer but barely constrain anything — their length is dominated by
-        # the axial span, so fibres drift centimetres before they pull.
-        # Keeping Clot Thickness small is what hides them.
-        for pos, a in enumerate(ring):
-            b_i = ring[(pos + 1) % len(ring)]
-            if a == b_i:
+            L = float(np.linalg.norm(end - muzzle))
+            if L < 1e-4:
                 continue
-            for s in range(1, clot_s + 1):
-                va, vb = strands[a][0][s], strands[b_i][0][s]
-                segs.append([va, vb])
-                binders.append((va, vb))
+            fired.append((fire, muzzle, dirv, end, stick, hit_n, L))
 
-        # chords straight across the bundle at every station. Neighbour ties
-        # alone leave the cross-section free to inflate — each fibre only
-        # feels its two neighbours, and 5% of slack per link adds up around
-        # the ring. A chord spans the diameter, so it caps the thickness.
-        half = max(len(ring) // 2, 1)
-        for s in range(1, clot_s + 1):
-            for k in rnd.sample(range(len(ring)),
-                                min(len(ring), max(2, len(ring) // 3))):
-                a = ring[k]
-                b_i = ring[(k + half) % len(ring)]
+        if not fired:
+            continue        # this volley found nowhere to go; try the next
+
+        # ---- the clot ------------------------------------------------
+        # The burst leaves as one mass of web fluid and only opens into
+        # separate strands partway to the target, so every strand rides a
+        # shared path first and blends out to its own line after that.
+        clot = min(max(p.shot_clot, 0.0), 0.95)
+        mu_c = np.mean([f[1] for f in fired], axis=0)
+        ax_c = np.sum([f[2] for f in fired], axis=0)
+        nax = float(np.linalg.norm(ax_c))
+        ax_c = ax_c / nax if nax > 1e-9 else fired[0][2]
+        L_c = float(np.mean([f[6] for f in fired]))
+        up_c = np.array([0.0, 0.0, 1.0]) - ax_c * float(ax_c[2])
+        nu_c = float(np.linalg.norm(up_c))
+        up_c = (up_c / nu_c if nu_c > 1e-6
+                else np.cross(ax_c, np.array([1.0, 0.0, 0.0])))
+        arc_c = p.shot_arc * L_c * 0.35
+        # the clot has volume: each strand sits at its own spot inside the mass
+        clot_r = p.shot_clot_size
+        e1_c, e2_c = up_c, np.cross(ax_c, up_c)
+        # the rope meanders as a unit — shared by every strand, so the bundle
+        # snakes instead of running dead straight like a cable
+        mean_amp = L_c * (0.015 + 0.03 * p.shot_whip)
+        waves_c = [[(rnd.uniform(0.5, 2.2), rnd.uniform(0.0, 2.0 * math.pi),
+                     rnd.uniform(-1.0, 1.0)) for _ in range(2)]
+                   for _axis in range(2)]
+        twist = p.shot_clot_twist * 2.0 * math.pi
+        # clot_s = last segment still fully balled up (opened() is 0 there).
+        # Lashing stops at it: one segment further the strands have already
+        # begun to separate, and a binder thread there would span metres and
+        # haul the opening fan back together.
+        clot_s = max(0, min(nseg - 1, int(clot * nseg)))
+        open_s = min(nseg - 1, clot_s + 1)
+
+        def opened(t):
+            """0 while the shots are still balled together, easing to 1 (fully
+            on their own lines) by the time they land."""
+            if t <= clot:
+                return 0.0
+            x = (t - clot) / max(1.0 - clot, 1e-6)
+            return x * x * (3.0 - 2.0 * x)
+
+        def rope(t, lob):
+            """Centre line of the travelling clot."""
+            mean = sum(amp * math.sin(math.pi * t * freq + ph)
+                       for freq, ph, amp in waves_c[0]) * 0.5
+            mean2 = sum(amp * math.sin(math.pi * t * freq + ph)
+                        for freq, ph, amp in waves_c[1]) * 0.5
+            env = math.sin(math.pi * min(t / max(clot, 1e-6), 1.0) ** 0.7)
+            return (mu_c + ax_c * (t * L_c) + up_c * (lob * arc_c)
+                    + e1_c * (mean * mean_amp * env)
+                    + e2_c * (mean2 * mean_amp * env))
+
+        # ---- pass 2: build the strands -------------------------------
+        for fire, muzzle, dirv, end, stick, hit_n, L in fired:
+            flight = (L / speed) * fps           # frames the tip is airborne
+            # where this strand sits in the rope's cross-section, and how its
+            # braid is phased — sqrt keeps the mass evenly filled
+            c_rad = clot_r * math.sqrt(rnd.random())
+            c_ph = rnd.uniform(0.0, 2.0 * math.pi)
+            # fibres in a real bundle wander in and out, touching and parting
+            # again along its length instead of holding a fixed spacing
+            f_freq = rnd.uniform(1.5, 4.5)
+            f_ph = rnd.uniform(0.0, 2.0 * math.pi)
+
+            # the lash: a perpendicular basis per strand carrying a few waves
+            # of different frequency, so shots read as thrown silk rather than
+            # laser lines. Both ends are held by the sin(pi t) envelope.
+            u = np.cross(dirv, _rand_unit(rnd))
+            u = (u / np.linalg.norm(u) if np.linalg.norm(u) > 1e-9
+                 else _rand_unit(rnd))
+            w = np.cross(dirv, u)
+            waves = [[(rnd.uniform(0.6, 3.2), rnd.uniform(0.0, 2.0 * math.pi),
+                       rnd.uniform(-1.0, 1.0)) for _ in range(3)]
+                     for _axis in range(2)]
+            # each strand leans its own way, so a burst fans out in flight
+            bow_u, bow_w = rnd.uniform(-1.0, 1.0), rnd.uniform(-1.0, 1.0)
+
+            # the lob: world-up component perpendicular to the flight line, so
+            # the strand rides over the straight path and drops onto the hit
+            upw = np.array([0.0, 0.0, 1.0]) - dirv * float(dirv[2])
+            nu = float(np.linalg.norm(upw))
+            upw = upw / nu if nu > 1e-6 else u
+            arc_h = p.shot_arc * L * 0.35 * rnd.uniform(0.75, 1.25)
+            hook = rnd.uniform(-1.0, 1.0)
+
+            def wander(t, axis):
+                v = sum(amp * math.sin(math.pi * t * freq + ph)
+                        for freq, ph, amp in waves[axis])
+                return v / 3.0
+
+            idx, arrive = [], []
+            for s in range(nseg + 1):
+                t = s / nseg
+                # t**1.8 skews the lob's peak to ~0.68 of the way out: shallow
+                # off the muzzle, steep climb, then the drop onto the hit
+                lob = math.sin(math.pi * t ** 1.8)
+                own = muzzle + (end - muzzle) * t
+                if 0 < s < nseg:                 # never shift the two anchors
+                    # Everything below pushes the strand sideways off the
+                    # flight line, and right before the impact point that
+                    # buries the last span in the surface it is landing on.
+                    # Taper it out over the final stretch: silk straightens
+                    # as it lands anyway.
+                    land = min(1.0, (1.0 - t) / 0.2) if stick else 1.0
+                    own = own + upw * (lob * arc_h * land) \
+                              + u * (lob * arc_h * 0.3 * hook * land)
+                    env = (math.sin(math.pi * t) * p.shot_whip * L * 0.12
+                           * land)
+                    own = own + u * (env * (wander(t, 0) + bow_u * 0.6)) \
+                              + w * (env * (wander(t, 1) + bow_w * 0.6))
+                    own[2] -= math.sin(math.pi * t) * L * p.shot_slack * land
+                    own += (np.array([rnd.uniform(-1, 1) for _ in range(3)])
+                            * p.jitter * 0.01 * L * land)
+                b = 1.0 if s == nseg else opened(t)
+                if b < 1.0:
+                    # still (partly) inside the travelling clot: braided round
+                    # the rope's axis, with the bundle swelling and pinching
+                    # along its length so it reads knotted rather than spun
+                    aa = c_ph + twist * t
+                    bulge = 1.0 + 0.4 * math.sin(math.pi * t * 3.0 + c_ph)
+                    fib = 1.0 + 0.55 * math.sin(f_freq * math.pi * t + f_ph)
+                    off = (e1_c * math.cos(aa) + e2_c * math.sin(aa)) \
+                        * (c_rad * bulge * fib)
+                    co = (rope(t, lob) + off) * (1.0 - b) + own * b
+                else:
+                    co = own
+                if 0 < s < nseg:
+                    # after the clot blend, not before: the rope's centre
+                    # line runs from the burst's mean muzzle to its mean
+                    # landing point and thinks nothing of going straight
+                    # through the target. Anchors are left alone — the
+                    # muzzle belongs to the emitter, the tip is already
+                    # sitting on the surface it hit.
+                    co = outside(co)
+                pin = (s == 0) or (s == nseg and stick)
+                at = fire + flight * t
+                idx.append(add_vert(co, at, pin, muzzle_end=(s == 0)))
+                arrive.append(at)
+                if s:
+                    segs.append([idx[-2], idx[-1]])
+            # angle around the burst axis, so "neighbouring" strands are known
+            # and ring threads can be strung between them
+            e2 = np.cross(ax_c, up_c)
+            ang_c = math.atan2(float(np.dot(dirv, e2)),
+                               float(np.dot(dirv, up_c)))
+            strands.append((idx, arrive, ang_c))
+            if stick:
+                add_splat(idx[-1], end, hit_n, arrive[-1])
+
+        # ---- webbing -------------------------------------------------
+        # The strands are the radials; this knits them into something that
+        # reads as a spider web rather than a fan of parallel curves:
+        #   * ring threads run between angularly neighbouring strands at a
+        #     similar distance out, the concentric pass of a real orb web
+        #   * bridge threads hop to whichever strand is actually nearest,
+        #     sometimes chaining on to a third — the irregular part
+        # Nothing is strung inside the clot: while the burst is still one mass
+        # a cross thread would just be a chord through overlapping strands, and
+        # those repeated chords are what made the geometry look stamped out.
+        def link(va, vb, extra=0.0):
+            """Silk between two existing points, sagging under its own weight.
+            Born once both ends exist."""
+            A, B = verts[va], verts[vb]
+            span = float(np.linalg.norm(B - A))
+            if span < 1e-4:
+                return
+            born = max(times[va], times[vb]) + extra
+            sub = max(p.detail, 1) + 1
+            droop = span * max(p.shot_slack, 0.04) * rnd.uniform(0.6, 2.2)
+            prev = va
+            inner = []
+            for s in range(1, sub):
+                t = s / sub
+                co = A + (B - A) * t
+                co[2] -= math.sin(math.pi * t) * droop
+                co += (np.array([rnd.uniform(-1, 1) for _ in range(3)])
+                       * p.jitter * 0.03 * span)
+                co = outside(co)
+                ni = add_vert(co, born)
+                segs.append([prev, ni])
+                prev = ni
+                inner.append(ni)
+            segs.append([prev, vb])
+            # loose fibres trailing off the thread — every junction in a real
+            # web frays, and it is most of what makes one read as silk
+            if inner and rnd.random() < 0.4:
+                root = rnd.choice(inner)
+                d = _rand_unit(rnd) * span * rnd.uniform(0.06, 0.22)
+                prev2 = root
+                for k in range(2):
+                    co = verts[root] + d * ((k + 1) * 0.5)
+                    co[2] -= span * 0.015 * (k + 1)
+                    nv = add_vert(outside(co), times[root])
+                    segs.append([prev2, nv])
+                    prev2 = nv
+
+        # ---- rope: lash the clot together ----------------------------
+        # Bunching the strands at build time is not enough — once the
+        # solver runs, gravity and the constraints pull them apart into a
+        # ribbon. Short binder threads between neighbours at every clot
+        # segment (plus a few chords across the bundle) hold the mass
+        # together as one rope, and since silk only pulls they never push
+        # the strands apart.
+        binders = []          # edges the solver must not tear
+        if len(strands) > 1 and clot_s > 1:
+            ring = sorted(range(len(strands)), key=lambda k: strands[k][2])
+
+            # Whipping: threads spiralling around the outside of the bundle,
+            # tied to whichever fibre they pass. This is how silk (and rope)
+            # actually holds together, and it reads as one cord. A ladder of
+            # straight rungs between neighbours binds just as well but renders
+            # as the cross-bars of a cable harness.
+            for _wi in range(max(2, len(strands) // 6)):
+                ph = rnd.uniform(0.0, 2.0 * math.pi)
+                turns = p.shot_clot_twist + rnd.uniform(1.5, 4.0)
+                rad_k = rnd.uniform(1.02, 1.3)
+                prev = None
+                for s in range(0, clot_s + 1):
+                    t = s / nseg
+                    aa = ph + turns * 2.0 * math.pi * (t / max(clot, 1e-6))
+                    lob = math.sin(math.pi * t ** 1.8)
+                    co = rope(t, lob) + (
+                        e1_c * math.cos(aa)
+                        + e2_c * math.sin(aa)) * (clot_r * rad_k)
+                    born = times[strands[ring[0]][0][s]]
+                    vi = add_vert(co, born, s == 0, muzzle_end=(s == 0))
+                    if prev is not None:
+                        segs.append([prev, vi])
+                    prev = vi
+                    # bite onto the nearest fibre — that tie is what binds
+                    if s % 2 == 0:
+                        best, bd = None, 1e18
+                        for a in ring:
+                            va = strands[a][0][s]
+                            d = float(np.linalg.norm(verts[va] - co))
+                            if d < bd:
+                                best, bd = va, d
+                        if best is not None:
+                            segs.append([vi, best])
+                            binders.append((vi, best))
+
+            # Ties between neighbouring fibres at every station. These are
+            # what actually holds the cord: they are short, so radial
+            # separation stretches them immediately. Diagonal ties along the
+            # bundle look nicer but barely constrain anything — their length
+            # is dominated by the axial span, so fibres drift centimetres
+            # before they pull. Keeping Clot Thickness small hides them.
+            for pos, a in enumerate(ring):
+                b_i = ring[(pos + 1) % len(ring)]
                 if a == b_i:
                     continue
-                va, vb = strands[a][0][s], strands[b_i][0][s]
-                segs.append([va, vb])
-                binders.append((va, vb))
+                for s in range(1, clot_s + 1):
+                    va, vb = strands[a][0][s], strands[b_i][0][s]
+                    segs.append([va, vb])
+                    binders.append((va, vb))
 
-    if len(strands) > 1 and p.shot_tangle > 0:
-        # only the opened-out part of each strand can carry webbing
-        cand = list(range(open_s, nseg))
-        by_angle = sorted(range(len(strands)), key=lambda k: strands[k][2])
-
-        if cand:
-            # pool of attachable points for the nearest-neighbour search
-            pool_v, pool_owner = [], []
-            for si, (idx_s, _arr, _ang) in enumerate(strands):
-                for s in cand:
-                    pool_v.append(idx_s[s])
-                    pool_owner.append(si)
-            P = np.stack([verts[v] for v in pool_v])
-            owner = np.asarray(pool_owner)
-
-            rings = int(round(p.shot_tangle * 0.55))
-            for k in range(p.shot_tangle):
-                if k < rings:
-                    # concentric: neighbour strand, similar distance out
-                    j = rnd.randrange(len(by_angle))
-                    a = by_angle[j]
-                    b = by_angle[(j + 1) % len(by_angle)]
-                    if a == b:
+            # chords straight across the bundle at every station. Neighbour
+            # ties alone leave the cross-section free to inflate — each
+            # fibre only feels its two neighbours, and 5% of slack per link
+            # adds up around the ring. A chord spans the diameter, so it
+            # caps the thickness.
+            # (`opp`, not `half`: the spread half-angle above is still needed
+            # by the next burst)
+            opp = max(len(ring) // 2, 1)
+            for s in range(1, clot_s + 1):
+                for k in rnd.sample(range(len(ring)),
+                                    min(len(ring), max(2, len(ring) // 3))):
+                    a = ring[k]
+                    b_i = ring[(k + opp) % len(ring)]
+                    if a == b_i:
                         continue
-                    sa = rnd.choice(cand)
-                    sb = min(max(sa + rnd.randint(-1, 1), cand[0]),
-                             cand[-1])
-                    link(strands[a][0][sa], strands[b][0][sb],
-                         rnd.uniform(0.0, 1.5))
-                else:
-                    # bridge: reach for the nearest point on another strand
-                    src = rnd.randrange(len(pool_v))
-                    d = np.linalg.norm(P - P[src], axis=1)
-                    d[owner == owner[src]] = np.inf
-                    if not np.isfinite(d).any():
-                        continue
-                    near = np.argsort(d)[:3]
-                    dst = int(rnd.choice(near))
-                    link(pool_v[src], pool_v[dst], rnd.uniform(0.0, 1.5))
-                    # a third of them carry on to yet another strand, which
-                    # is what builds junctions instead of isolated chords
-                    if rnd.random() < 0.35:
-                        d2 = np.linalg.norm(P - P[dst], axis=1)
-                        d2[owner == owner[dst]] = np.inf
-                        d2[owner == owner[src]] = np.inf
-                        if np.isfinite(d2).any():
-                            link(pool_v[dst],
-                                 pool_v[int(np.argmin(d2))],
-                                 rnd.uniform(0.0, 2.0))
+                    va, vb = strands[a][0][s], strands[b_i][0][s]
+                    segs.append([va, vb])
+                    binders.append((va, vb))
+
+        if len(strands) > 1 and p.shot_tangle > 0:
+            # only the opened-out part of each strand can carry webbing
+            cand = list(range(open_s, nseg))
+            by_angle = sorted(range(len(strands)), key=lambda k: strands[k][2])
+
+            if cand:
+                # pool of attachable points for the nearest-neighbour search
+                pool_v, pool_owner = [], []
+                for si, (idx_s, _arr, _ang) in enumerate(strands):
+                    for s in cand:
+                        pool_v.append(idx_s[s])
+                        pool_owner.append(si)
+                P = np.stack([verts[v] for v in pool_v])
+                owner = np.asarray(pool_owner)
+
+                rings = int(round(p.shot_tangle * 0.55))
+                for k in range(p.shot_tangle):
+                    if k < rings:
+                        # concentric: neighbour strand, similar distance out
+                        j = rnd.randrange(len(by_angle))
+                        a = by_angle[j]
+                        b = by_angle[(j + 1) % len(by_angle)]
+                        if a == b:
+                            continue
+                        sa = rnd.choice(cand)
+                        sb = min(max(sa + rnd.randint(-1, 1), cand[0]),
+                                 cand[-1])
+                        link(strands[a][0][sa], strands[b][0][sb],
+                             rnd.uniform(0.0, 1.5))
+                    else:
+                        # bridge: reach for the nearest point on another strand
+                        src = rnd.randrange(len(pool_v))
+                        d = np.linalg.norm(P - P[src], axis=1)
+                        d[owner == owner[src]] = np.inf
+                        if not np.isfinite(d).any():
+                            continue
+                        near = np.argsort(d)[:3]
+                        dst = int(rnd.choice(near))
+                        link(pool_v[src], pool_v[dst], rnd.uniform(0.0, 1.5))
+                        # a third of them carry on to yet another strand, which
+                        # is what builds junctions instead of isolated chords
+                        if rnd.random() < 0.35:
+                            d2 = np.linalg.norm(P - P[dst], axis=1)
+                            d2[owner == owner[dst]] = np.inf
+                            d2[owner == owner[src]] = np.inf
+                            if np.isfinite(d2).any():
+                                link(pool_v[dst],
+                                     pool_v[int(np.argmin(d2))],
+                                     rnd.uniform(0.0, 2.0))
 
     if not segs:
         return None
@@ -1407,6 +1514,18 @@ def _build_shot(context, p, env_objs):
         tarr[mi] = times[i]
     me.attributes.new(A_SHOT, 'FLOAT', 'POINT').data.foreach_set(
         "value", tarr)
+
+    # Muzzle anchors ride the emitter. The GPU solver carries them with its
+    # transform from the frame they fire onward — the same mechanism that
+    # keeps an impact point stuck to the geometry it hit — so the strands
+    # trail a moving emitter instead of hanging where they left it.
+    if emit is not None and p.shot_stick_emitter and muzzles:
+        marr = np.zeros(len(verts), dtype=np.bool_)
+        for i in muzzles:
+            marr[mesh_idx[i]] = True
+        me.attributes.new(A_EMIT, 'BOOLEAN', 'POINT').data.foreach_set(
+            "value", marr)
+        me[P_EMITTER] = emit.name
 
     # The threads binding the clot's fibres together are only millimetres
     # long, so any jostle passes the tear threshold in relative terms and

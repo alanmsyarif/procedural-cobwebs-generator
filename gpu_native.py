@@ -28,8 +28,10 @@
 #   p8 = (sdf_inv_cell.xyz, sdf_delta.y)
 # The follow kernel reuses p1..p3 as the rows of a 4x4 transform.
 #
-# pos.w is the pin state: 0 free, 1 pinned in place, 2 pinned AND carried
-# along by the collider (see _FOLLOW). Every ">0.5" test means "pinned".
+# pos.w is the pin state: 0 free, 1 pinned in place, 2+k pinned AND carried
+# along by collider k (see _FOLLOW). Every ">0.5" test means "pinned".
+# Web Shot muzzle anchors are state 1 and placed from the emitter every
+# frame by _ANCHOR instead.
 
 import random
 
@@ -39,7 +41,7 @@ import bpy
 from mathutils import Vector
 
 from .constants import (A_PIN, A_SHOT, A_NOTEAR, A_GPU_POS, A_BROKEN,
-                        A_TENSION)
+                        A_TENSION, A_EMIT, P_EMITTER)
 
 _W = 1024
 _BROKEN_FLAG = False
@@ -237,28 +239,64 @@ void main() {
 
 # Stuck points ride the collider: each frame the collider's incremental
 # rigid motion (rotation included) is applied to points whose pin state is
-# 2, so a web that latched onto a moving object travels with it instead of
-# hanging in the air where it stuck. p1..p3 are the rows of that transform,
-# expressed in the web's local space.
+# 2+k, so a web that latched onto a moving object travels with it instead
+# of hanging in the air where it stuck. p1..p3 are the rows of that
+# transform, expressed in the web's local space. (Web Shot muzzles use
+# _ANCHOR instead — a contact has no fire frame to date it from, so this
+# one has to accumulate.)
 _FOLLOW = _COMMON + """
 void main() {
     int i = int(gl_GlobalInvocationID.y) * WIDTH
           + int(gl_GlobalInvocationID.x);
     if (i >= N_POINTS) { return; }
     vec4 P4 = imageLoad(posA, texel(i));
-    /* p4.x selects the group: state 2+k is stuck to collider k, so each
-       collection member is dispatched with its own transform */
+    /* p4.x selects the group: state 2+k is stuck to host k, so each
+       collection member (and the emitter) is dispatched with its own
+       transform */
     if (abs(P4.w - p4.x) > 0.25) { return; }
+    vec4 PV = imageLoad(prevI, texel(i));
+    /* prevI.w = birth time: a muzzle anchor was built where the emitter
+       stood at its fire frame, so carrying it before then would apply that
+       motion twice. It starts riding the moment it fires (p4.y = now). */
+    if (PV.w > p4.y) { return; }
     vec3 P = P4.xyz;
     imageStore(posA, texel(i), vec4(dot(p1.xyz, P) + p1.w,
                                     dot(p2.xyz, P) + p2.w,
                                     dot(p3.xyz, P) + p3.w, P4.w));
     /* carry the verlet history too, or the point reads as having been
-       teleported and fires off at collider speed once released */
-    vec4 PV = imageLoad(prevI, texel(i));
+       teleported and fires off at host speed once released */
     imageStore(prevI, texel(i), vec4(dot(p1.xyz, PV.xyz) + p1.w,
                                      dot(p2.xyz, PV.xyz) + p2.w,
                                      dot(p3.xyz, PV.xyz) + p3.w, PV.w));
+}
+"""
+
+# Web Shot muzzle anchors. Unlike a collider — which needs full rigid
+# motion and has no idea when a point stuck to it — an emitter anchor
+# knows the frame it fired, so its place can be stated outright instead of
+# accumulated frame by frame:
+#
+#     position(t) = emitter(t) + (built position - emitter(fire frame))
+#
+# The bracketed part is baked into `base` at bind time. Nothing to keep in
+# step with, so scrubbing, jumping, dropped frames and rebuilds all land in
+# the same place. p1.xyz is the emitter's current location in web space,
+# p4.y is now (an anchor holds its built pose until its shot fires).
+_ANCHOR = _COMMON + """
+void main() {
+    int i = int(gl_GlobalInvocationID.y) * WIDTH
+          + int(gl_GlobalInvocationID.x);
+    if (i >= N_POINTS) { return; }
+    vec4 B = imageLoad(base, texel(i));
+    if (B.w < 0.5) { return; }           /* not an emitter anchor */
+    vec4 PV = imageLoad(prevI, texel(i));
+    if (PV.w > p4.y) { return; }         /* not fired yet */
+    vec3 P = p1.xyz + B.xyz;
+    vec4 P4 = imageLoad(posA, texel(i));
+    imageStore(posA, texel(i), vec4(P, P4.w));
+    /* prev follows, or the anchor reads as teleported and whips the
+       strand hanging off it */
+    imageStore(prevI, texel(i), vec4(P, PV.w));
 }
 """
 
@@ -382,6 +420,8 @@ def _assign_collider(web_obj, colliders, pos, mask, offset):
     idx = np.flatnonzero(mask)
     best = np.full(len(pos), np.inf)
     for k, coll in enumerate(colliders):
+        if coll.type != 'MESH':          # an emitter empty has no surface
+            continue
         ob = coll.evaluated_get(deps)
         me = ob.to_mesh()
         me.calc_loop_triangles()
@@ -401,6 +441,32 @@ def _assign_collider(web_obj, colliders, pos, mask, offset):
                 best[i] = d
                 out[i] = k
     return out
+
+
+def _anchor_base(web_obj, emitter, pos, mask, fire):
+    """Bake each muzzle anchor's offset from the emitter.
+
+    A muzzle is built where the emitter stood at its fire frame, so
+    `built - emitter(fire)` is the offset it keeps for the rest of the
+    shot. Returned as an n x 4 array (offset.xyz, 1 = is an anchor) for the
+    anchor kernel, which adds the emitter's current location back on. Both
+    ends are sampled the way the generator sampled the emitter: location
+    only, so a rotating emitter carries its silk but does not swing it."""
+    base = np.zeros((len(pos), 4), np.float32)
+    if fire is None or not mask.any():
+        return base
+    from .generator import _obj_loc_at
+    winv = web_obj.matrix_world.inverted_safe()
+    idx = np.flatnonzero(mask)
+    for f in np.unique(fire[idx]):
+        at = _obj_loc_at(emitter, float(f))
+        if at is None:
+            continue
+        local = np.asarray(winv @ Vector(at), dtype=np.float64)
+        rows = idx[fire[idx] == f]
+        base[rows, :3] = (pos[rows] - local).astype(np.float32)
+        base[rows, 3] = 1.0
+    return base
 
 
 def _bake_sdf(gpu, web_obj, colliders, res):
@@ -544,10 +610,12 @@ class NativeState:
         # which is every other web type.
         fps = max(bpy.context.scene.render.fps, 1)
         birth = np.full(n, -1e9, np.float32)
+        fire = None
         a = me.attributes.get(A_SHOT)
         if a is not None and a.domain == 'POINT':
             tmp = np.zeros(n, np.float32)
             a.data.foreach_get("value", tmp)
+            fire = tmp.copy()               # fire frame per point
             birth = (tmp / fps).astype(np.float32)
 
         # position textures are built after the collider is known, since
@@ -587,21 +655,51 @@ class NativeState:
         # get the same state from the solve kernel.
         # pin state 2+k means "stuck to colliders[k]", so every member of a
         # collider collection carries its own anchors
-        self.follow = bool(getattr(g, "stick_follow", False)) and colliders
-        self.stick_objs = list(colliders) if self.follow else []
-        if self.follow:
+        ride = bool(getattr(g, "stick_follow", False)) and bool(colliders)
+        self.stick_objs = list(colliders) if ride else []
+        self.n_coll = len(self.stick_objs)
+        if ride:
             grp = _assign_collider(obj, self.stick_objs, pos, pin > 0.5,
                                    g.collision_offset)
             hit = grp >= 0
             pin = np.where(hit, 2.0 + grp, pin).astype(np.float32)
-            self._coll_prev = [o.matrix_world.copy() for o in self.stick_objs]
             self._assigned = hit.copy()
-            self._offset = g.collision_offset
-            self.follow = bool(hit.any()) or g.stickiness > 0.0
+            # runtime sticky contacts come back as plain state 2, i.e.
+            # colliders[0] — only meaningful while collider follow is on
+            self.latch = bool(hit.any()) or g.stickiness > 0.0
         else:
-            self._coll_prev = []
             self._assigned = np.zeros(n, np.bool_)
-            self._offset = g.collision_offset
+            self.latch = False
+        self._offset = g.collision_offset
+
+        # A Web Shot's muzzle anchors are placed straight from the emitter
+        # every frame (see _ANCHOR), so they take no part in the collider
+        # follow groups — pin state 1 keeps the physics off them.
+        self.emitter = None
+        name = me.get(P_EMITTER)
+        a = me.attributes.get(A_EMIT)
+        if name and a is not None and a.domain == 'POINT':
+            self.emitter = bpy.data.objects.get(name)
+            if self.emitter is None:
+                print("Arachne: emitter %r is gone (renamed or deleted) — "
+                      "the shot's muzzle anchors stay where they fired."
+                      % name)
+        base4 = np.zeros((n, 4), np.float32)
+        if self.emitter is not None:
+            mask = np.zeros(n, np.bool_)
+            a.data.foreach_get("value", mask)
+            mask &= pin > 0.5
+            if mask.any():
+                pin = np.where(mask, 1.0, pin).astype(np.float32)
+                self._assigned |= mask
+                base4 = _anchor_base(obj, self.emitter, pos, mask, fire)
+            if base4[:, 3].max() < 0.5:
+                self.emitter = None
+        self.anchors = _tex(gpu, n, 4, base4)
+        self._coll_prev = [o.matrix_world.copy() for o in self.stick_objs]
+        self._emit_prev = None
+        self._carry_frame = None
+        self.follow = bool(self._assigned.any()) or self.latch
 
         pos4 = np.concatenate([pos, pin[:, None]], 1).astype(np.float32)
         # prev carries the birth time in .w — the shaders preserve it
@@ -628,6 +726,10 @@ class NativeState:
         self.sh_follow = _shader(gpu, _FOLLOW,
                                  [('RGBA32F', pt, 'posA'),
                                   ('RGBA32F', pt, 'prevI')], n, m, sdf_res)
+        self.sh_anchor = _shader(gpu, _ANCHOR,
+                                 [('RGBA32F', pt, 'posA'),
+                                  ('RGBA32F', pt, 'prevI'),
+                                  ('RGBA32F', pt, 'base')], n, m, sdf_res)
         self.sh_tear = _shader(gpu, _TEAR,
                                [('RGBA32F', pt, 'posA'),
                                 ('RGBA32F', pt, 'edges')], n, m, sdf_res)
@@ -655,11 +757,83 @@ class NativeState:
                                 1.0 if g.enable_tearing else 0.0))
         sh.uniform_float("p6", (1.0 if g.resist_compression else 0.0,
                                 sdf_on, g.stickiness,
-                                2.0 if self.follow else 1.0))
+                                2.0 if self.latch else 1.0))
         sh.uniform_float("p7", (sdf_bmin[0], sdf_bmin[1], sdf_bmin[2],
                                 sdf_delta[0]))
         sh.uniform_float("p8", (sdf_inv[0], sdf_inv[1], sdf_inv[2],
                                 sdf_delta[1]))
+
+    def hosts_moved(self):
+        """Has anything the anchors are stuck to moved since the last
+        carry? Cheap enough to ask on every depsgraph update."""
+        if self.emitter is not None:
+            if self._emit_prev is None:
+                return True
+            cur = self.emitter.matrix_world.translation
+            if (cur - self._emit_prev).length > 1e-7:
+                return True
+        return any(host.matrix_world != self._coll_prev[k]
+                   for k, host in enumerate(self.stick_objs))
+
+    def carry(self, obj, stepping=False):
+        """Put every kinematic anchor where its host says it should be.
+
+        Called from step(), and also on frames the sim only holds — jumping
+        the timeline, dropped frames during playback and scrubbing all skip
+        stepping, and an anchor left frozen there parts company with the
+        object it is welded to. Anchors are kinematic, not simulated, so
+        they can be placed on any frame; the rest of the web still needs the
+        frames played through."""
+        gpu = self._gpu
+        scene = bpy.context.scene
+        frame = scene.frame_current
+        t_now = frame / max(scene.render.fps, 1)
+        gx, gy = self._groups(self.n)
+
+        # Web Shot muzzles: stated outright from the emitter's location, so
+        # this is correct on any frame, in any order, however the timeline
+        # got here
+        if self.emitter is not None:
+            # world for the moved-since-last-carry test, web-local for the
+            # kernel — the web object need not sit at the origin
+            self._emit_prev = self.emitter.matrix_world.translation.copy()
+            E = obj.matrix_world.inverted_safe() @ self._emit_prev
+            sh = self.sh_anchor
+            sh.bind()
+            sh.image('posA', self.posA)
+            sh.image('prevI', self.prev)
+            sh.image('base', self.anchors)
+            sh.uniform_float("p1", (E.x, E.y, E.z, 0.0))
+            sh.uniform_float("p4", (0.0, t_now, 0.0, 0.0))
+            gpu.compute.dispatch(sh, gx, gy, 1)
+
+        if not self.follow:
+            return
+        # Scrubbed backwards: anchors that fired after this frame are unborn
+        # again and would sit out the transform, losing their place in the
+        # chain of increments for good. Leave the whole delta pending — the
+        # next real step applies it in one go and everything re-syncs.
+        if not stepping and self._carry_frame is not None and (
+                frame < self._carry_frame):
+            return
+        self._carry_frame = frame
+        wi = obj.matrix_world.inverted_safe()
+        for k, host in enumerate(self.stick_objs):
+            cur = host.matrix_world
+            if cur == self._coll_prev[k]:
+                continue
+            M = wi @ cur @ self._coll_prev[k].inverted_safe()                 @ obj.matrix_world
+            sh = self.sh_follow
+            sh.bind()
+            sh.image('posA', self.posA)
+            sh.image('prevI', self.prev)
+            for r in range(3):
+                sh.uniform_float("p%d" % (r + 1),
+                                 (M[r][0], M[r][1], M[r][2], M[r][3]))
+            # p4.y = now, so anchors only start riding once they fire
+            sh.uniform_float("p4", (2.0 + k, t_now, 0.0, 0.0))
+            gpu.compute.dispatch(sh, gx, gy, 1)
+            self._coll_prev[k] = cur.copy()
 
     def step(self, obj, g, dt):
         gpu = self._gpu
@@ -707,25 +881,9 @@ class NativeState:
             self._push(sh, g, dt2, t_now, g_loc, w_loc, sphere,
                        sdf_on, sdf_delta, sdf_bmin, sdf_inv)
 
-        # carry stuck points along with the collider first, so the physics
+        # carry stuck points along with their host first, so the physics
         # substeps see them already in their new place
-        if self.follow:
-            wi = obj.matrix_world.inverted_safe()
-            for k, coll in enumerate(self.stick_objs):
-                cur = coll.matrix_world
-                if cur == self._coll_prev[k]:
-                    continue
-                M = wi @ cur @ self._coll_prev[k].inverted_safe()                     @ obj.matrix_world
-                sh = self.sh_follow
-                sh.bind()
-                sh.image('posA', self.posA)
-                sh.image('prevI', self.prev)
-                for r in range(3):
-                    sh.uniform_float("p%d" % (r + 1),
-                                     (M[r][0], M[r][1], M[r][2], M[r][3]))
-                sh.uniform_float("p4", (2.0 + k, 0.0, 0.0, 0.0))
-                gpu.compute.dispatch(sh, gx, gy, 1)
-                self._coll_prev[k] = cur.copy()
+        self.carry(obj, stepping=True)
 
         for _ in range(sub):
             sh = self.sh_int
@@ -773,13 +931,15 @@ class NativeState:
         as plain state 2 — the shader has no idea which member of a collider
         collection it touched. Hand those points to the nearest one so they
         ride it. Only runs on the frames where new latches appear."""
-        if len(self.stick_objs) < 2:
+        if self.n_coll < 2:
             return                       # state 2 already means colliders[0]
         loose = np.isclose(state[:, 3], 2.0) & ~self._assigned
         if not loose.any():
             return
-        grp = _assign_collider(obj, self.stick_objs, state[:, :3], loose,
-                               self._offset)
+        # only the colliders are candidates — an emitter has no surface to
+        # latch onto, and it sits past n_coll in stick_objs
+        grp = _assign_collider(obj, self.stick_objs[:self.n_coll],
+                               state[:, :3], loose, self._offset)
         hit = grp >= 0
         if not hit.any():
             return
@@ -792,7 +952,7 @@ class NativeState:
         """Read the sim state off the GPU into mesh attributes.
         Returns the arrays so callers can cache them for render replay."""
         state = _read(self.posA, self.n, 4)
-        if self.follow:
+        if self.latch:
             self._claim_latched(obj, state)
         pos = np.ascontiguousarray(state[:, :3]).ravel()
         brk = _read(self.edges, self.m, 4)[:, 3] > 0.5

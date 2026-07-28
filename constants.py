@@ -1,5 +1,12 @@
 # Shared names used across Arachne modules.
 #
+# BUILD is drawn at the bottom of the N-panel and must match bl_info's
+# version in __init__.py. Blender caches imported modules, so copying new
+# files into the addons folder changes nothing until scripts are reloaded —
+# the panel showing an older build than the Add-ons list is how that shows.
+BUILD = "3.2.3 status-panel"
+
+#
 # NOTE: the `swf_` prefix on attributes and custom properties below is
 # deliberate legacy. Those keys are written into .blend files (mesh
 # attributes, object/scene properties), so renaming them would silently
@@ -28,6 +35,12 @@ A_BROKEN  = "swf_broken"    # EDGE  bool   — GPU solver torn-edge mask
 A_NOTEAR  = "swf_notear"    # EDGE  bool   — edge the solver must never tear
 A_SHOT    = "swf_shot_t"    # POINT float  — frame the flying tip reaches
                             #                this point (web shot reveal)
+A_EMIT    = "swf_emit"      # POINT bool   — muzzle anchor: rides the web
+                            #                shot emitter object as it moves
+
+# Mesh-datablock custom property: name of the object a Web Shot was fired
+# from. The GPU solver looks it up to carry A_EMIT points along with it.
+P_EMITTER = "swf_emitter"
 
 # Dew droplet physics state (POINT domain, on the droplet point cloud)
 A_DEW_HOME = "swf_dew_home"  # vector — birth position (respawn target)
