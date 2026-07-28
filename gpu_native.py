@@ -23,9 +23,13 @@
 #   p3 = (wind_local.xyz, sor)
 #   p4 = (sphere.xyz, sphere_radius)
 #   p5 = (collision_offset, friction, tear_threshold, tearing_on)
-#   p6 = (resist_compression, sdf_on, stickiness, 0)
+#   p6 = (resist_compression, sdf_on, stickiness, latch_state)
 #   p7 = (sdf_box_min.xyz, sdf_delta.x)
 #   p8 = (sdf_inv_cell.xyz, sdf_delta.y)
+# The follow kernel reuses p1..p3 as the rows of a 4x4 transform.
+#
+# pos.w is the pin state: 0 free, 1 pinned in place, 2 pinned AND carried
+# along by the collider (see _FOLLOW). Every ">0.5" test means "pinned".
 
 import random
 
@@ -200,7 +204,7 @@ void main() {
                 imageStore(prevI, texel(i),
                            vec4(pv + (target - pv) * pb, pv4.w));
                 P = target;
-                outw = max(outw, adhere);
+                outw = max(outw, adhere * p6.w);
             }
         }
     } else if (p4.w > 0.0) {
@@ -224,10 +228,35 @@ void main() {
             imageStore(prevI, texel(i),
                        vec4(pv + (target - pv) * pb, pv4.w));
             P = target;
-            outw = max(outw, adhere);
+            outw = max(outw, adhere * p6.w);
         }
     }
     imageStore(posOut, texel(i), vec4(P, outw));
+}
+"""
+
+# Stuck points ride the collider: each frame the collider's incremental
+# rigid motion (rotation included) is applied to points whose pin state is
+# 2, so a web that latched onto a moving object travels with it instead of
+# hanging in the air where it stuck. p1..p3 are the rows of that transform,
+# expressed in the web's local space.
+_FOLLOW = _COMMON + """
+void main() {
+    int i = int(gl_GlobalInvocationID.y) * WIDTH
+          + int(gl_GlobalInvocationID.x);
+    if (i >= N_POINTS) { return; }
+    vec4 P4 = imageLoad(posA, texel(i));
+    if (P4.w < 1.5) { return; }          /* not stuck to the collider */
+    vec3 P = P4.xyz;
+    imageStore(posA, texel(i), vec4(dot(p1.xyz, P) + p1.w,
+                                    dot(p2.xyz, P) + p2.w,
+                                    dot(p3.xyz, P) + p3.w, P4.w));
+    /* carry the verlet history too, or the point reads as having been
+       teleported and fires off at collider speed once released */
+    vec4 PV = imageLoad(prevI, texel(i));
+    imageStore(prevI, texel(i), vec4(dot(p1.xyz, PV.xyz) + p1.w,
+                                     dot(p2.xyz, PV.xyz) + p2.w,
+                                     dot(p3.xyz, PV.xyz) + p3.w, PV.w));
 }
 """
 
@@ -337,6 +366,35 @@ def _collect_colliders(g):
     if g.collider is not None and g.collider.type == 'MESH':
         return [g.collider]
     return []
+
+
+def _near_collider(web_obj, coll, pos, mask, offset):
+    """Boolean mask of points (web-local `pos`) that sit on `coll`'s
+    surface, among those already flagged by `mask`. Used once at bind time
+    to decide which anchors ride the collider when it moves."""
+    from mathutils.bvhtree import BVHTree
+    out = np.zeros(len(pos), np.bool_)
+    if not mask.any():
+        return out
+    deps = bpy.context.evaluated_depsgraph_get()
+    ob = coll.evaluated_get(deps)
+    me = ob.to_mesh()
+    me.calc_loop_triangles()
+    M = web_obj.matrix_world.inverted_safe() @ coll.matrix_world
+    verts = [tuple(M @ v.co) for v in me.vertices]
+    tris = [tuple(lt.vertices) for lt in me.loop_triangles]
+    ob.to_mesh_clear()
+    if not tris:
+        return out
+    bvh = BVHTree.FromPolygons(verts, tris)
+    V = np.asarray(verts)
+    diag = float(np.linalg.norm(V.max(0) - V.min(0))) if len(V) else 1.0
+    thresh = max(offset * 3.0, diag * 0.02, 1e-4)
+    for i in np.flatnonzero(mask):
+        co, _n, _idx, d = bvh.find_nearest(Vector(pos[i]), thresh * 4.0)
+        if co is not None and d is not None and d <= thresh:
+            out[i] = True
+    return out
 
 
 def _bake_sdf(gpu, web_obj, colliders, res):
@@ -486,16 +544,12 @@ class NativeState:
             a.data.foreach_get("value", tmp)
             birth = (tmp / fps).astype(np.float32)
 
-        pos4 = np.concatenate([pos, pin[:, None]], 1).astype(np.float32)
-        # prev carries the birth time in .w — the shaders preserve it
-        prev4 = np.concatenate([pos, birth[:, None]], 1).astype(np.float32)
+        # position textures are built after the collider is known, since
+        # pinned points sitting on it are promoted to "follow" state first
         edge4 = np.concatenate(
             [edges.astype(np.float32), rest[:, None], broken[:, None]],
             1).astype(np.float32)
 
-        self.posA = _tex(gpu, n, 4, pos4)
-        self.posB = _tex(gpu, n, 4, pos4)
-        self.prev = _tex(gpu, n, 4, prev4)
         self.edges = _tex(gpu, m, 4, edge4)
         self.inc_off = _tex(gpu, n, 2, inc_off)
         self.inc_lst = _tex(gpu, len(lst), 1, lst[:, None])
@@ -521,6 +575,28 @@ class NativeState:
             else:
                 print("Arachne: SDF bake failed (no faces?) — "
                       "falling back to sphere collision.")
+        # Points already pinned onto the collider's surface (a web shot's
+        # impact anchors, or hand-pinned ones) are promoted to pin state 2,
+        # so they are carried along when it moves. Runtime sticky contacts
+        # get the same state from the solve kernel.
+        self.follow = bool(getattr(g, "stick_follow", False)) and colliders
+        self.stick_obj = colliders[0] if len(colliders) == 1 else None
+        if self.follow and self.stick_obj is not None:
+            near = _near_collider(obj, self.stick_obj, pos,
+                                  pin > 0.5, g.collision_offset)
+            pin = np.where(near, 2.0, pin).astype(np.float32)
+            self._coll_prev = self.stick_obj.matrix_world.copy()
+        else:
+            self.follow = False
+            self._coll_prev = None
+
+        pos4 = np.concatenate([pos, pin[:, None]], 1).astype(np.float32)
+        # prev carries the birth time in .w — the shaders preserve it
+        prev4 = np.concatenate([pos, birth[:, None]], 1).astype(np.float32)
+        self.posA = _tex(gpu, n, 4, pos4)
+        self.posB = _tex(gpu, n, 4, pos4)
+        self.prev = _tex(gpu, n, 4, prev4)
+
         self._dummy3d = _tex3d(gpu, 1, np.full((1, 1, 1), 1e3, np.float32))
 
         pt = 'FLOAT_2D'
@@ -536,6 +612,9 @@ class NativeState:
                                  ('R32F', pt, 'incLst'),
                                  ('R32F', 'FLOAT_3D', 'sdf')],
                                 n, m, sdf_res)
+        self.sh_follow = _shader(gpu, _FOLLOW,
+                                 [('RGBA32F', pt, 'posA'),
+                                  ('RGBA32F', pt, 'prevI')], n, m, sdf_res)
         self.sh_tear = _shader(gpu, _TEAR,
                                [('RGBA32F', pt, 'posA'),
                                 ('RGBA32F', pt, 'edges')], n, m, sdf_res)
@@ -562,7 +641,8 @@ class NativeState:
                                 g.tear_threshold,
                                 1.0 if g.enable_tearing else 0.0))
         sh.uniform_float("p6", (1.0 if g.resist_compression else 0.0,
-                                sdf_on, g.stickiness, 0.0))
+                                sdf_on, g.stickiness,
+                                2.0 if self.follow else 1.0))
         sh.uniform_float("p7", (sdf_bmin[0], sdf_bmin[1], sdf_bmin[2],
                                 sdf_delta[0]))
         sh.uniform_float("p8", (sdf_inv[0], sdf_inv[1], sdf_inv[2],
@@ -613,6 +693,23 @@ class NativeState:
         def push(sh):
             self._push(sh, g, dt2, t_now, g_loc, w_loc, sphere,
                        sdf_on, sdf_delta, sdf_bmin, sdf_inv)
+
+        # carry stuck points along with the collider first, so the physics
+        # substeps see them already in their new place
+        if self.follow and self.stick_obj is not None:
+            cur = self.stick_obj.matrix_world
+            if cur != self._coll_prev:
+                wi = obj.matrix_world.inverted_safe()
+                M = wi @ cur @ self._coll_prev.inverted_safe()                     @ obj.matrix_world
+                sh = self.sh_follow
+                sh.bind()
+                sh.image('posA', self.posA)
+                sh.image('prevI', self.prev)
+                for r in range(3):
+                    sh.uniform_float("p%d" % (r + 1),
+                                     (M[r][0], M[r][1], M[r][2], M[r][3]))
+                gpu.compute.dispatch(sh, gx, gy, 1)
+                self._coll_prev = cur.copy()
 
         for _ in range(sub):
             sh = self.sh_int

@@ -164,6 +164,7 @@ class ARN_PT_main(Panel):
             col.prop(g, "collision_offset")
             col.prop(g, "friction")
             col.prop(g, "stickiness")
+            col.prop(g, "stick_follow")
             col.separator()
             col.prop(g, "enable_tearing")
             col.prop(g, "tear_threshold")

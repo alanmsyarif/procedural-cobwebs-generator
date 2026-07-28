@@ -322,6 +322,12 @@ class ARN_GPUProps(PropertyGroup):
                     "contact: a fraction of contacting points latch to "
                     "the surface and stay stuck (0 = slide off freely, "
                     "1 = every contact sticks — the web drapes and clings)")
+    stick_follow: BoolProperty(
+        name="Stuck Follows Collider", default=True,
+        description="Threads anchored on the collider — a web shot's impact "
+                    "points, or contacts latched by Stickiness — are carried "
+                    "along as it moves and turns, instead of staying behind "
+                    "in mid-air. Single collider object only")
     seed: IntProperty(name="Seed", default=0, min=0)
 
 

@@ -53,6 +53,10 @@ install)
 - **Stickiness**: threads adhere to the collider on contact a
   tunable fraction of contacting points latch to the surface so the web
   drapes and clings instead of sliding off
+- **Stuck Follows Collider**: anchors sitting on the collider a web
+  shot's impact points, or contacts caught by Stickiness are carried
+  along by its rigid motion, rotation included, so the web travels with
+  the object instead of hanging where it stuck (single collider object)
 - Deteriorate (pre-broken threads) and pre-warm (starts settled)
 - Real-time playback in the viewport
 - Render-safe frame cache: every frame simulated in the viewport is
