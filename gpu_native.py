@@ -34,7 +34,8 @@ import numpy as np
 import bpy
 from mathutils import Vector
 
-from .constants import A_PIN, A_GPU_POS, A_BROKEN, A_TENSION
+from .constants import (A_PIN, A_SHOT, A_NOTEAR, A_GPU_POS, A_BROKEN,
+                        A_TENSION)
 
 _W = 1024
 _BROKEN_FLAG = False
@@ -103,12 +104,21 @@ void main() {
     if (i >= N_POINTS) { return; }
     vec4 P4 = imageLoad(posA, texel(i));
     vec3 P = P4.xyz;
-    if (P4.w > 0.5) { imageStore(prevI, texel(i), vec4(P, 0.0)); return; }
-    vec3 pv = imageLoad(prevI, texel(i)).xyz;
+    /* prevI.w carries the point's birth time in seconds — the moment the
+       flying tip of a Web Shot strand reaches it. Every prevI store must
+       preserve it. Other web types carry -1e9, i.e. born before the sim
+       started. */
+    vec4 PV = imageLoad(prevI, texel(i));
+    if (P4.w > 0.5) { imageStore(prevI, texel(i), vec4(P, PV.w)); return; }
+    /* Unfired: held frozen with zero velocity, so a strand enters the sim
+       taut at its fire pose instead of having sagged for all the frames
+       it spent waiting to be shot. */
+    if (PV.w > p1.w) { imageStore(prevI, texel(i), vec4(P, PV.w)); return; }
+    vec3 pv = PV.xyz;
     vec3 vel = (P - pv) * p1.y;
     vec3 nse = vec3(n1(P, p1.w, 0.0), n1(P, p1.w, 17.0), n1(P, p1.w, 39.0));
     vec3 f = p2.xyz + p3.xyz + nse * p1.z;
-    imageStore(prevI, texel(i), vec4(P, 0.0));
+    imageStore(prevI, texel(i), vec4(P, PV.w));
     imageStore(posA, texel(i), vec4(P + vel + f * p1.x, P4.w));
 }
 """
@@ -121,6 +131,12 @@ void main() {
     vec4 P4 = imageLoad(posIn, texel(i));
     vec3 P = P4.xyz;
     if (P4.w > 0.5) { imageStore(posOut, texel(i), P4); return; }
+    /* prevI.w = birth time (see the integrate stage): a Web Shot point the
+       flying tip has not reached yet takes no constraint or collision */
+    if (imageLoad(prevI, texel(i)).w > p1.w) {
+        imageStore(posOut, texel(i), P4);
+        return;
+    }
     float outw = P4.w;   /* may latch to a pin (1.0) on sticky contact */
 
     vec2 off2 = imageLoad(incOff, texel(i)).xy;
@@ -169,7 +185,8 @@ void main() {
                 vec3 n = (dot(gi, gi) > 0.0625) ? normalize(gi)
                                                 : vec3(0.0, 0.0, 1.0);
                 vec3 target = P + n * (coff - d);
-                vec3 pv = imageLoad(prevI, texel(i)).xyz;
+                vec4 pv4 = imageLoad(prevI, texel(i));
+                vec3 pv = pv4.xyz;
                 /* stickiness p6.z: a per-point fraction of contacts
                    latch to the surface (become pins), the rest just
                    slide/settle with friction — sticky silk catching */
@@ -181,7 +198,7 @@ void main() {
                 }
                 float pb = mix(p5.y, 1.0, adhere);
                 imageStore(prevI, texel(i),
-                           vec4(pv + (target - pv) * pb, 0.0));
+                           vec4(pv + (target - pv) * pb, pv4.w));
                 P = target;
                 outw = max(outw, adhere);
             }
@@ -195,7 +212,8 @@ void main() {
         if (len < rr) {
             vec3 nrm = d / max(len, 1e-9);
             vec3 target = c + nrm * rr;
-            vec3 pv = imageLoad(prevI, texel(i)).xyz;
+            vec4 pv4 = imageLoad(prevI, texel(i));
+            vec3 pv = pv4.xyz;
             float adhere = 0.0;
             if (p6.z > 0.0) {
                 float hr = fract(sin(float(i) * 12.9898 + 4.1)
@@ -204,7 +222,7 @@ void main() {
             }
             float pb = mix(p5.y, 1.0, adhere);
             imageStore(prevI, texel(i),
-                       vec4(pv + (target - pv) * pb, 0.0));
+                       vec4(pv + (target - pv) * pb, pv4.w));
             P = target;
             outw = max(outw, adhere);
         }
@@ -219,7 +237,10 @@ void main() {
           + int(gl_GlobalInvocationID.x);
     if (e >= M_EDGES) { return; }
     vec4 E = imageLoad(edges, texel(e));
-    if (E.w > 0.5) { return; }
+    /* E.w: >0.5 already torn, <-0.5 flagged unbreakable (binder threads
+       inside a web-shot clot are millimetres long, so ordinary relative
+       stretch snaps them instantly and the bundle falls apart) */
+    if (E.w > 0.5 || E.w < -0.5) { return; }
     vec3 A = imageLoad(posA, texel(int(E.x))).xyz;
     vec3 B = imageLoad(posA, texel(int(E.y))).xyz;
     float len = length(B - A);
@@ -433,6 +454,12 @@ class NativeState:
             rnd = random.Random(g.seed)
             broken[[e for e in range(m)
                     if rnd.random() < g.deteriorate]] = 1.0
+        # -1 marks an edge the tear kernel must leave alone
+        a = me.attributes.get(A_NOTEAR)
+        if a is not None and a.domain == 'EDGE' and m:
+            nt = np.zeros(m, np.bool_)
+            a.data.foreach_get("value", nt)
+            broken[nt & (broken < 0.5)] = -1.0
 
         # incidence lists for the gather solve (topology is static)
         counts = np.zeros(n, np.int64)
@@ -448,14 +475,27 @@ class NativeState:
                 cursor[v] += 1
         inc_off = np.stack([starts, counts], 1).astype(np.float32)
 
+        # per-point birth time (Web Shot), in the same seconds the shaders
+        # see as p1.w. Absent = -1e9: every point alive from the first step,
+        # which is every other web type.
+        fps = max(bpy.context.scene.render.fps, 1)
+        birth = np.full(n, -1e9, np.float32)
+        a = me.attributes.get(A_SHOT)
+        if a is not None and a.domain == 'POINT':
+            tmp = np.zeros(n, np.float32)
+            a.data.foreach_get("value", tmp)
+            birth = (tmp / fps).astype(np.float32)
+
         pos4 = np.concatenate([pos, pin[:, None]], 1).astype(np.float32)
+        # prev carries the birth time in .w — the shaders preserve it
+        prev4 = np.concatenate([pos, birth[:, None]], 1).astype(np.float32)
         edge4 = np.concatenate(
             [edges.astype(np.float32), rest[:, None], broken[:, None]],
             1).astype(np.float32)
 
         self.posA = _tex(gpu, n, 4, pos4)
         self.posB = _tex(gpu, n, 4, pos4)
-        self.prev = _tex(gpu, n, 4, pos4)
+        self.prev = _tex(gpu, n, 4, prev4)
         self.edges = _tex(gpu, m, 4, edge4)
         self.inc_off = _tex(gpu, n, 2, inc_off)
         self.inc_lst = _tex(gpu, len(lst), 1, lst[:, None])

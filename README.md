@@ -23,6 +23,20 @@ Minimum Blender 5.2 LTS Version
   0 = local webbing hugging each surface, 1 = long cables strung
   between separate/floating pieces of geometry (a bridge).
 
+- **Web Shot** Spider-Man style strands fired from an emitter over
+  time. Each shot leaves the emitter at its own frame, flies at **Shot
+  Speed** and sticks where it hits the selected geometry (a miss keeps a
+  free end that whips). The emitter's animated location is sampled per
+  shot, so a moving hand leaves each strand anchored where it fired;
+  point an **Aim Target** at something to fire at it, or leave both
+  empty to spray from the 3D cursor in all directions. Where a shot
+  lands it splays into an **impact splat**: radial filaments sprayed
+  across the surface, forked and knitted together, tips stuck down and
+  wrapping over corners. **Cross Threads** string silk between shots
+  already in the air, **Whip** bends the strands in flight. Unfired
+  strands are frozen by the solver until their shot goes off, so nothing
+  has sagged before it flies.
+
 **Live Update** toggle it on (Generate panel) after generating a web and
 every parameter above rebuilds the web instantly as you drag the
 sliders dial in the look in realtime, then add the solver and strands.
@@ -83,6 +97,18 @@ select vertices, and use **Pin / Unpin** in the panel.
 - **Spread** (Chaotic Cobweb) controls how uniformly spiders fill the
   volume: 0 = dense local clumps, 1 = Pixar-style even coverage. For
   dense reference-style webs try 1200 Spin Steps, Spread 0.9.
+- **Web Shot**: set Shot Speed against your frame rate — 60 m/s at 24 fps
+  crosses 2.5 m per frame, so short shots land in one or two frames. Pull
+  it down to 10-20 to actually see the strand travel. Keep the solver's
+  **Pre-warm Frames** at 0 (adding the solver to a shot web does this,
+  along with Tension 0.95 — slack silk sags off the wall it just stuck
+  to) so the first shots are not already settled at frame 1, and play
+  from frame 1: the reveal is driven by the current frame, not the sim.
+- A single splat on a wall, as in the reference: Shots 1, Spread 0°,
+  Shot Speed ~20, an Emitter and an Aim Target, Splat Size to taste. The
+  surface being shot at should NOT be the solver's Collider — its
+  bounding sphere swallows the web and tears it apart. Shot mode leaves
+  the collider unset for that reason.
 - **Mesh (SDF)** collision needs a closed mesh with outward normals.
   Animated collider *location* is supported; rotation is frozen at the
   bake. Raise SDF Resolution for thin or detailed colliders.

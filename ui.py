@@ -18,12 +18,18 @@ class ARN_OT_full_setup(Operator):
 
     def execute(self, context):
         env = [o for o in context.selected_objects if o.type == 'MESH']
-        collider = env[0] if env else None
+        # Web Shot strands already stick where they hit, and the surface
+        # they were fired at makes a terrible bounding-sphere collider —
+        # its sphere swallows the whole web and blows it apart. Leave the
+        # collider unset and let the user pick a moving one.
+        collider = None if context.scene.swf_web.mode == 'SHOT' else (
+            env[0] if env else None)
         obj = build_web_object(context, context.scene.swf_web, env)
         if obj is None:
             self.report({'ERROR'},
-                        "Chaotic Cobweb needs selected mesh geometry to "
-                        "anchor to.")
+                        "Nothing to build — Chaotic Cobweb needs selected "
+                        "mesh geometry to anchor to, Web Shot needs at "
+                        "least one valid shot.")
             return {'CANCELLED'}
         # this web gets a solver + strandify — don't let Live Update
         # rebuild it (that would change topology under the solver)
@@ -68,6 +74,35 @@ class ARN_PT_main(Panel):
             col.prop(p, "detail")
             col.prop(p, "seed")
             col.label(text="Select anchor geometry first.", icon='INFO')
+        elif p.mode == 'SHOT':
+            col.prop(p, "shot_emitter")
+            col.prop(p, "shot_aim")
+            col.separator()
+            col.prop(p, "shot_count")
+            col.prop(p, "shot_start")
+            col.prop(p, "shot_interval")
+            col.prop(p, "shot_speed")
+            col.prop(p, "shot_range")
+            col.prop(p, "shot_spread")
+            col.separator()
+            col.prop(p, "shot_clot")
+            col.prop(p, "shot_clot_size")
+            col.prop(p, "shot_clot_twist")
+            col.prop(p, "shot_arc")
+            col.prop(p, "shot_whip")
+            col.prop(p, "shot_slack")
+            col.separator()
+            col.prop(p, "shot_splat")
+            col.prop(p, "shot_splat_size")
+            col.prop(p, "shot_splat_web")
+            col.separator()
+            col.prop(p, "shot_tangle")
+            col.prop(p, "jitter")
+            col.prop(p, "detail")
+            col.prop(p, "seed")
+            col.label(text="Select what the shots hit.", icon='INFO')
+            col.label(text="Shots fly once the solver or strands are on.",
+                      icon='INFO')
         else:
             col.prop(p, "radials")
             col.prop(p, "rings")

@@ -18,10 +18,10 @@ import bpy
 from bpy.types import Operator
 
 from .constants import (
-    GROUP_STRANDIFY, A_DEW_HOME, A_DEW_SIZE, A_DEW_FALL, A_DEW_PREV,
+    GROUP_STRANDIFY, A_SHOT, A_DEW_HOME, A_DEW_SIZE, A_DEW_FALL, A_DEW_PREV,
     A_DEW_RAND, A_DEW_NPOS, A_DEW_RESP, A_DEW_DET,
 )
-from .nodeutils import H, sock_in, minmax_sockets, input_identifier
+from .nodeutils import H, sock_in, minmax_sockets, set_modifier_input
 from .materials import (ensure_silk_material, ensure_dew_material,
                         ensure_tension_material)
 
@@ -53,16 +53,35 @@ def _build_group():
     sock_in(iface, "Drip Distance",      'NodeSocketFloat', 3.0, 0.1, 100.0)
     sock_in(iface, "Dew Material",       'NodeSocketMaterial')
     sock_in(iface, "Seed",               'NodeSocketInt',   0, 0, 100000)
+    sock_in(iface, "Shot Reveal",        'NodeSocketBool',  False)
     iface.new_socket(name="Geometry", in_out='OUTPUT',
                      socket_type='NodeSocketGeometry')
 
-    gi = h.n("NodeGroupInput", -1200, 0)
+    gi = h.n("NodeGroupInput", -1700, 0)
     go = h.n("NodeGroupOutput", 6350, 0)
     g = gi.outputs
 
+    # ---- shot reveal -------------------------------------------------------
+    # Web Shot strands carry the frame their flying tip reaches each point
+    # (swf_shot_t). Points still in the future are deleted, so a strand
+    # grows from the muzzle out to its impact point at Shot Speed. Webs
+    # without the attribute read 0 and are never culled, so this is inert
+    # on orb webs and cobwebs even if the switch is left on.
+    stime = h.n("GeometryNodeInputSceneTime", -1500, -180)
+    shot_t = h.named('FLOAT', A_SHOT, -1500, -320)
+    unborn = h.cmp('FLOAT', 'GREATER_THAN', -1300, -250,
+                   shot_t.outputs["Attribute"], stime.outputs["Frame"],
+                   label="not fired yet")
+    cull = h.bmath('AND', -1150, -250, g["Shot Reveal"],
+                   unborn.outputs["Result"])
+    reveal = h.n("GeometryNodeDeleteGeometry", -1150, 100,
+                 label="shot reveal", domain='POINT', mode='ALL')
+    h.lk(g["Geometry"], reveal.inputs["Geometry"])
+    h.lk(cull.outputs["Boolean"], reveal.inputs["Selection"])
+
     # ---- strands -----------------------------------------------------------
     m2c = h.n("GeometryNodeMeshToCurve", -950, 100)
-    h.lk(g["Geometry"], m2c.inputs["Mesh"])
+    h.lk(reveal.outputs["Geometry"], m2c.inputs["Mesh"])
 
     # Catmull-Rom interpolation smooths through the simulated points;
     # Smooth Segments = evaluated points per span (1 = angular/off)
@@ -490,7 +509,7 @@ def _build_group():
     return nt
 
 
-STRANDIFY_VERSION = 9
+STRANDIFY_VERSION = 10
 
 
 def ensure_strandify_group():
@@ -512,12 +531,11 @@ def apply_strandify(obj):
     for sock_name, mat in (("Silk Material", ensure_silk_material()),
                            ("Dew Material", ensure_dew_material()),
                            ("Tension Material", ensure_tension_material())):
-        ident = input_identifier(group, sock_name)
-        if ident:
-            try:
-                mod[ident] = mat
-            except (KeyError, TypeError):
-                pass
+        set_modifier_input(mod, group, sock_name, mat)
+    # a Web Shot mesh carries per-point arrival frames — switch the reveal
+    # on for it so the strands fly instead of appearing all at once
+    if obj.type == 'MESH' and obj.data.attributes.get(A_SHOT) is not None:
+        set_modifier_input(mod, group, "Shot Reveal", True)
     return mod
 
 

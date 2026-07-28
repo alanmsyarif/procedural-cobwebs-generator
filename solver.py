@@ -20,7 +20,7 @@ from .constants import (
     GROUP_SOLVER, A_PREV, A_REST, A_PIN, A_CORR, A_ACCUM,
     A_TENS_E, A_TENSION,
 )
-from .nodeutils import H, sock_in, input_identifier
+from .nodeutils import H, sock_in, set_modifier_input
 
 
 def _build_group():
@@ -394,24 +394,17 @@ def apply_solver(obj, collider=None, report=None):
     mod = obj.modifiers.new("Arachne Tearing Solver", 'NODES')
     mod.node_group = group
 
-    pin_id = input_identifier(group, "Pin Vertices")
-    if pin_id:
-        try:
-            mod[pin_id + "_use_attribute"] = True
-            mod[pin_id + "_attribute_name"] = A_PIN
-        except (KeyError, TypeError):
-            if report:
-                report({'WARNING'},
-                       "Couldn't auto-bind pins — set 'Pin Vertices' to "
-                       "attribute '%s' manually." % A_PIN)
+    ok = set_modifier_input(mod, group, "Pin Vertices", True,
+                            "_use_attribute")
+    ok = set_modifier_input(mod, group, "Pin Vertices", A_PIN,
+                            "_attribute_name") and ok
+    if not ok and report:
+        report({'WARNING'},
+               "Couldn't auto-bind pins — set 'Pin Vertices' to "
+               "attribute '%s' manually." % A_PIN)
 
     if collider is not None:
-        coll_id = input_identifier(group, "Collision Object")
-        if coll_id:
-            try:
-                mod[coll_id] = collider
-            except (KeyError, TypeError):
-                pass
+        set_modifier_input(mod, group, "Collision Object", collider)
 
     # fit the valence-gather loop to this web: the loop runs Max Valence
     # iterations for EVERY point, so trimming 16 -> actual max (usually
@@ -422,9 +415,7 @@ def apply_solver(obj, collider=None, report=None):
             counts[e.vertices[0]] += 1
             counts[e.vertices[1]] += 1
         max_val = min(max(counts, default=16) or 16, 64)
-        val_id = input_identifier(group, "Max Valence")
-        if val_id:
-            mod[val_id] = max_val
+        set_modifier_input(mod, group, "Max Valence", max_val)
     except (AttributeError, KeyError, TypeError):
         pass
     return mod

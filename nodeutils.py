@@ -151,3 +151,39 @@ def input_identifier(group, sock_name):
                 and item.in_out == 'INPUT' and item.name == sock_name):
             return item.identifier
     return None
+
+
+def set_modifier_input(mod, group, sock_name, value, suffix=""):
+    """Set a geometry-nodes modifier input by socket name. Returns True if
+    it landed.
+
+    Blender 5.2 moved these values off the modifier's IDProperties onto
+    `modifier.properties.inputs.<identifier>`, where the plain value lives
+    in `.value` and the attribute toggle in `.attribute_name`. Older builds
+    only have the `mod[identifier]` mapping — with `mod[identifier +
+    "_use_attribute"]` / `"_attribute_name"` for the attribute form — so
+    both paths are tried."""
+    ident = input_identifier(group, sock_name)
+    if not ident:
+        return False
+    ins = getattr(getattr(mod, "properties", None), "inputs", None)
+    item = getattr(ins, ident, None) if ins is not None else None
+    if item is not None:
+        field = {"": "value",
+                 "_use_attribute": "use_attribute",
+                 "_attribute_name": "attribute_name"}.get(suffix)
+        if field == "use_attribute":
+            # 5.2 drops the separate toggle: a non-empty attribute name is
+            # what switches the input over
+            return True
+        if field is not None and hasattr(item, field):
+            try:
+                setattr(item, field, value)
+                return True
+            except (AttributeError, TypeError):
+                pass
+    try:
+        mod[ident + suffix] = value
+        return True
+    except (KeyError, TypeError):
+        return False

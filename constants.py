@@ -25,6 +25,9 @@ A_TENS_E = "swf_tens_edge"  # EDGE  float  — normalized stretch (0=rest, 1=tea
 A_TENSION = "swf_tension"   # POINT float  — edge tension averaged to points
 A_GPU_POS = "swf_gpu_pos"   # POINT vector — GPU solver positions writeback
 A_BROKEN  = "swf_broken"    # EDGE  bool   — GPU solver torn-edge mask
+A_NOTEAR  = "swf_notear"    # EDGE  bool   — edge the solver must never tear
+A_SHOT    = "swf_shot_t"    # POINT float  — frame the flying tip reaches
+                            #                this point (web shot reveal)
 
 # Dew droplet physics state (POINT domain, on the droplet point cloud)
 A_DEW_HOME = "swf_dew_home"  # vector — birth position (respawn target)

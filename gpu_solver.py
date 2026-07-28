@@ -16,7 +16,7 @@ from bpy.props import (
 from bpy.types import Operator, PropertyGroup
 
 from .constants import (
-    GROUP_GPU_APPLY, A_PIN, A_GPU_POS, A_BROKEN, A_TENSION,
+    GROUP_GPU_APPLY, A_PIN, A_SHOT, A_GPU_POS, A_BROKEN, A_TENSION,
 )
 from .nodeutils import H
 
@@ -155,7 +155,7 @@ def _on_frame(scene, depsgraph=None):
 #  GN apply group (positions + broken-edge deletion, feeds Strandify)
 # ---------------------------------------------------------------------------
 
-GPU_APPLY_VERSION = 1
+GPU_APPLY_VERSION = 2
 
 
 def _build_apply_group():
@@ -168,9 +168,23 @@ def _build_apply_group():
     gi = h.n("NodeGroupInput", -600, 0)
     go = h.n("NodeGroupOutput", 600, 0)
 
+    # Web Shot reveal: points the flying tip has not reached yet are
+    # dropped, so the strands appear one shot at a time as the frames pass
+    # (the solver keeps them frozen meanwhile). swf_shot_t is absent on
+    # every other web type and reads 0, which culls nothing.
+    stime = h.n("GeometryNodeInputSceneTime", -900, -180)
+    shot_t = h.named('FLOAT', A_SHOT, -900, -320)
+    unborn = h.cmp('FLOAT', 'GREATER_THAN', -750, -250,
+                   shot_t.outputs["Attribute"], stime.outputs["Frame"],
+                   label="not fired yet")
+    reveal = h.n("GeometryNodeDeleteGeometry", -750, 0, label="shot reveal",
+                 domain='POINT', mode='ALL')
+    h.lk(gi.outputs["Geometry"], reveal.inputs["Geometry"])
+    h.lk(unborn.outputs["Result"], reveal.inputs["Selection"])
+
     gpos = h.named('FLOAT_VECTOR', A_GPU_POS, -600, -300)
     sp = h.n("GeometryNodeSetPosition", -300, 0, label="GPU positions")
-    h.lk(gi.outputs["Geometry"], sp.inputs["Geometry"])
+    h.lk(reveal.outputs["Geometry"], sp.inputs["Geometry"])
     h.lk(gpos.outputs["Attribute"], sp.inputs["Position"])
 
     brk = h.named('BOOLEAN', A_BROKEN, -300, -300)
@@ -227,6 +241,12 @@ def enable_gpu_solver(context, obj, collider=None):
             pass
 
     g = obj.swf_gpu
+    if me.attributes.get(A_SHOT) is not None:
+        # a shot must be mid-flight at its fire frame, not pre-settled, and
+        # fresh silk is taut — slack rest lengths make an impact splat sag
+        # off the wall it just stuck to
+        g.pre_warm = 0
+        g.tension = 0.95
     if collider is not None:
         g.collider = collider
     g.enabled = True
