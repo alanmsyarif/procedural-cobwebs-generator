@@ -246,7 +246,9 @@ void main() {
           + int(gl_GlobalInvocationID.x);
     if (i >= N_POINTS) { return; }
     vec4 P4 = imageLoad(posA, texel(i));
-    if (P4.w < 1.5) { return; }          /* not stuck to the collider */
+    /* p4.x selects the group: state 2+k is stuck to collider k, so each
+       collection member is dispatched with its own transform */
+    if (abs(P4.w - p4.x) > 0.25) { return; }
     vec3 P = P4.xyz;
     imageStore(posA, texel(i), vec4(dot(p1.xyz, P) + p1.w,
                                     dot(p2.xyz, P) + p2.w,
@@ -368,32 +370,36 @@ def _collect_colliders(g):
     return []
 
 
-def _near_collider(web_obj, coll, pos, mask, offset):
-    """Boolean mask of points (web-local `pos`) that sit on `coll`'s
-    surface, among those already flagged by `mask`. Used once at bind time
-    to decide which anchors ride the collider when it moves."""
+def _assign_collider(web_obj, colliders, pos, mask, offset):
+    """For every point flagged in `mask`, which collider it is sitting on
+    (index into `colliders`), or -1 for none. Run once at bind time to
+    decide which object each anchor rides when things start moving."""
     from mathutils.bvhtree import BVHTree
-    out = np.zeros(len(pos), np.bool_)
-    if not mask.any():
+    out = np.full(len(pos), -1, np.int32)
+    if not mask.any() or not colliders:
         return out
     deps = bpy.context.evaluated_depsgraph_get()
-    ob = coll.evaluated_get(deps)
-    me = ob.to_mesh()
-    me.calc_loop_triangles()
-    M = web_obj.matrix_world.inverted_safe() @ coll.matrix_world
-    verts = [tuple(M @ v.co) for v in me.vertices]
-    tris = [tuple(lt.vertices) for lt in me.loop_triangles]
-    ob.to_mesh_clear()
-    if not tris:
-        return out
-    bvh = BVHTree.FromPolygons(verts, tris)
-    V = np.asarray(verts)
-    diag = float(np.linalg.norm(V.max(0) - V.min(0))) if len(V) else 1.0
-    thresh = max(offset * 3.0, diag * 0.02, 1e-4)
-    for i in np.flatnonzero(mask):
-        co, _n, _idx, d = bvh.find_nearest(Vector(pos[i]), thresh * 4.0)
-        if co is not None and d is not None and d <= thresh:
-            out[i] = True
+    idx = np.flatnonzero(mask)
+    best = np.full(len(pos), np.inf)
+    for k, coll in enumerate(colliders):
+        ob = coll.evaluated_get(deps)
+        me = ob.to_mesh()
+        me.calc_loop_triangles()
+        M = web_obj.matrix_world.inverted_safe() @ coll.matrix_world
+        verts = [tuple(M @ v.co) for v in me.vertices]
+        tris = [tuple(lt.vertices) for lt in me.loop_triangles]
+        ob.to_mesh_clear()
+        if not tris:
+            continue
+        bvh = BVHTree.FromPolygons(verts, tris)
+        V = np.asarray(verts)
+        diag = float(np.linalg.norm(V.max(0) - V.min(0)))
+        thresh = max(offset * 3.0, diag * 0.02, 1e-4)
+        for i in idx:
+            co, _n, _t, d = bvh.find_nearest(Vector(pos[i]), thresh * 4.0)
+            if co is not None and d is not None and d <= thresh                     and d < best[i]:
+                best[i] = d
+                out[i] = k
     return out
 
 
@@ -579,16 +585,23 @@ class NativeState:
         # impact anchors, or hand-pinned ones) are promoted to pin state 2,
         # so they are carried along when it moves. Runtime sticky contacts
         # get the same state from the solve kernel.
+        # pin state 2+k means "stuck to colliders[k]", so every member of a
+        # collider collection carries its own anchors
         self.follow = bool(getattr(g, "stick_follow", False)) and colliders
-        self.stick_obj = colliders[0] if len(colliders) == 1 else None
-        if self.follow and self.stick_obj is not None:
-            near = _near_collider(obj, self.stick_obj, pos,
-                                  pin > 0.5, g.collision_offset)
-            pin = np.where(near, 2.0, pin).astype(np.float32)
-            self._coll_prev = self.stick_obj.matrix_world.copy()
+        self.stick_objs = list(colliders) if self.follow else []
+        if self.follow:
+            grp = _assign_collider(obj, self.stick_objs, pos, pin > 0.5,
+                                   g.collision_offset)
+            hit = grp >= 0
+            pin = np.where(hit, 2.0 + grp, pin).astype(np.float32)
+            self._coll_prev = [o.matrix_world.copy() for o in self.stick_objs]
+            self._assigned = hit.copy()
+            self._offset = g.collision_offset
+            self.follow = bool(hit.any()) or g.stickiness > 0.0
         else:
-            self.follow = False
-            self._coll_prev = None
+            self._coll_prev = []
+            self._assigned = np.zeros(n, np.bool_)
+            self._offset = g.collision_offset
 
         pos4 = np.concatenate([pos, pin[:, None]], 1).astype(np.float32)
         # prev carries the birth time in .w — the shaders preserve it
@@ -696,11 +709,13 @@ class NativeState:
 
         # carry stuck points along with the collider first, so the physics
         # substeps see them already in their new place
-        if self.follow and self.stick_obj is not None:
-            cur = self.stick_obj.matrix_world
-            if cur != self._coll_prev:
-                wi = obj.matrix_world.inverted_safe()
-                M = wi @ cur @ self._coll_prev.inverted_safe()                     @ obj.matrix_world
+        if self.follow:
+            wi = obj.matrix_world.inverted_safe()
+            for k, coll in enumerate(self.stick_objs):
+                cur = coll.matrix_world
+                if cur == self._coll_prev[k]:
+                    continue
+                M = wi @ cur @ self._coll_prev[k].inverted_safe()                     @ obj.matrix_world
                 sh = self.sh_follow
                 sh.bind()
                 sh.image('posA', self.posA)
@@ -708,8 +723,9 @@ class NativeState:
                 for r in range(3):
                     sh.uniform_float("p%d" % (r + 1),
                                      (M[r][0], M[r][1], M[r][2], M[r][3]))
+                sh.uniform_float("p4", (2.0 + k, 0.0, 0.0, 0.0))
                 gpu.compute.dispatch(sh, gx, gy, 1)
-                self._coll_prev = cur.copy()
+                self._coll_prev[k] = cur.copy()
 
         for _ in range(sub):
             sh = self.sh_int
@@ -752,10 +768,33 @@ class NativeState:
         push(sh)
         gpu.compute.dispatch(sh, gx, gy, 1)
 
+    def _claim_latched(self, obj, state):
+        """A contact latched by Stickiness comes back from the solve kernel
+        as plain state 2 — the shader has no idea which member of a collider
+        collection it touched. Hand those points to the nearest one so they
+        ride it. Only runs on the frames where new latches appear."""
+        if len(self.stick_objs) < 2:
+            return                       # state 2 already means colliders[0]
+        loose = np.isclose(state[:, 3], 2.0) & ~self._assigned
+        if not loose.any():
+            return
+        grp = _assign_collider(obj, self.stick_objs, state[:, :3], loose,
+                               self._offset)
+        hit = grp >= 0
+        if not hit.any():
+            return
+        state[hit, 3] = 2.0 + grp[hit]
+        self._assigned |= hit
+        self.posA = _tex(self._gpu, self.n, 4,
+                         np.ascontiguousarray(state, np.float32))
+
     def write_back(self, obj):
         """Read the sim state off the GPU into mesh attributes.
         Returns the arrays so callers can cache them for render replay."""
-        pos = np.ascontiguousarray(_read(self.posA, self.n, 4)[:, :3]).ravel()
+        state = _read(self.posA, self.n, 4)
+        if self.follow:
+            self._claim_latched(obj, state)
+        pos = np.ascontiguousarray(state[:, :3]).ravel()
         brk = _read(self.edges, self.m, 4)[:, 3] > 0.5
         tens = _read(self.tens, self.n, 1).ravel().copy()
         apply_arrays(obj, pos, brk, tens)
