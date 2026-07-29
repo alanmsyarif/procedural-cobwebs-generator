@@ -574,8 +574,15 @@ class NativeState:
             a.data.foreach_get("value", tmp)
             pin = tmp.astype(np.float32)
 
-        # tension slack (Kole): rest lengths longer than built lengths
-        slack = 1.0 + (1.0 - g.tension) * 1.5
+        # tension slack (Kole): rest lengths longer than built lengths.
+        # Past 1.0 it runs the other way — rest SHORTER than built, so the
+        # unilateral constraints pull permanently and the residual gravity
+        # droop that survives at 1.0 comes out. Much gentler slope on that
+        # side: the slack rate would contract the web by a quarter and yank
+        # the anchors, where 2.0 here is 15% pre-tension and already rigid.
+        t = g.tension
+        slack = (1.0 + (1.0 - t) * 1.5 if t <= 1.0
+                 else 1.0 - (t - 1.0) * 0.15)
         rest = (np.linalg.norm(pos[edges[:, 0]] - pos[edges[:, 1]],
                                axis=1) * slack).astype(np.float32)
 
@@ -617,6 +624,7 @@ class NativeState:
             a.data.foreach_get("value", tmp)
             fire = tmp.copy()               # fire frame per point
             birth = (tmp / fps).astype(np.float32)
+        self.fire = fire                    # kept for pull_force's reveal gate
 
         # position textures are built after the collider is known, since
         # pinned points sitting on it are promoted to "follow" state first
@@ -700,6 +708,13 @@ class NativeState:
         self._emit_prev = None
         self._carry_frame = None
         self.follow = bool(self._assigned.any()) or self.latch
+
+        # two-way coupling (see pull_force). Single collider only: pin
+        # state 2 means colliders[0], and a collection is a merged static
+        # SDF bake with no per-member surface to push back against anyway.
+        self.drag_obj = colliders[0] if len(colliders) == 1 else None
+        self._last_state = None
+        self._last_edges = None
 
         pos4 = np.concatenate([pos, pin[:, None]], 1).astype(np.float32)
         # prev carries the birth time in .w — the shaders preserve it
@@ -955,7 +970,74 @@ class NativeState:
         if self.latch:
             self._claim_latched(obj, state)
         pos = np.ascontiguousarray(state[:, :3]).ravel()
-        brk = _read(self.edges, self.m, 4)[:, 3] > 0.5
+        edges = _read(self.edges, self.m, 4)
+        brk = edges[:, 3] > 0.5
         tens = _read(self.tens, self.n, 1).ravel().copy()
         apply_arrays(obj, pos, brk, tens)
+        # kept for pull_force, which runs after this and would otherwise
+        # pay for the same two readbacks again
+        self._last_state = state
+        self._last_edges = edges
         return pos, brk, tens
+
+    # -- two-way coupling ---------------------------------------------------
+
+    def pull_force(self, g):
+        """Net force the web is exerting on the collider, in world space.
+        Returns None when there is nothing to report.
+
+        The web only ever touches the collider through points stuck to it —
+        impact anchors and Stickiness latches, pin state 2+k. Those are
+        kinematic, so the stretch their incident threads carry is force the
+        solver silently throws away; summing it is the reaction the collider
+        never got. Unilateral, like the constraints themselves: a slack
+        thread pulls with nothing, and a thread stuck at both ends is an
+        internal force that cancels.
+
+        Reporting only — Bullet moves the object (see gpu_solver's pull
+        field), so mass, friction, gravity and tumble are its business."""
+        state, edges = self._last_state, self._last_edges
+        if (self.drag_obj is None or state is None or edges is None
+                or not getattr(g, "pull_collider", False)):
+            return None
+
+        # points welded to this collider: pin state 2 is colliders[0]
+        stuck = np.isclose(state[:, 3], 2.0)
+        if not stuck.any():
+            return None
+
+        live = edges[:, 3] <= 0.5            # torn threads pull with nothing
+        ia = edges[:, 0].astype(np.int32)
+        ib = edges[:, 1].astype(np.int32)
+        pos = state[:, :3]
+
+        # A Web Shot's impact anchors are pinned to the collider from the
+        # first frame — that is how the generator builds them, long before
+        # the flying tip gets there. Without this the whole web hauls on the
+        # object while it is still visibly in the air. Same rule the reveal
+        # uses: a point exists once its shot has reached it, and a thread
+        # only transmits once both of its ends do.
+        if self.fire is not None:
+            born = self.fire <= bpy.context.scene.frame_current
+            if not born.any():
+                return None
+            stuck = stuck & born
+            if not stuck.any():
+                return None
+            live = live & born[ia] & born[ib]
+
+        force = np.zeros(3, np.float64)
+        for src, dst in ((ia, ib), (ib, ia)):
+            sel = live & stuck[src] & ~stuck[dst]
+            if not sel.any():
+                continue
+            d = pos[dst[sel]] - pos[src[sel]]
+            length = np.linalg.norm(d, axis=1)
+            ok = length > 1e-9
+            if not ok.any():
+                continue
+            d, length = d[ok], length[ok]
+            stretch = np.maximum(length - edges[sel, 2][ok], 0.0)
+            force += (d / length[:, None] * stretch[:, None]).sum(0)
+        return force * float(g.pull_strength)
+

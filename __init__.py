@@ -6,7 +6,8 @@
 #  * GPU Solver — Blender-native GLSL compute (no dependencies): verlet
 #                 with tension slack, unilateral silk constraints, wind,
 #                 collision, friction, tearing, deteriorate, pre-warm
-#  * Strandify  — silk tubes, dripping dew physics, tension heatmap material
+#  * Strandify  — silk or synth-web tubes, opt-in dripping dew physics,
+#                 tension heatmap material
 #
 #  QUICK START: (optionally select a collider mesh) -> N-panel > Arachne
 #  > "Create Web + Sim + Strands" -> play from frame 1.
@@ -20,12 +21,13 @@
 bl_info = {
     "name": "Arachne",
     "author": "Amsy",
-    "version": (3, 2, 3),
+    "version": (3, 5, 2),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar (N) > Arachne",
     "description": "Procedural webs with a native-GPU tearing solver, "
-                   "silk strandify and dripping dew. Web Shot strands "
-                   "fire in bursts and stay stuck to their emitter",
+                   "natural-silk or synthetic web-fluid strandify and "
+                   "opt-in dripping dew. Web Shot strands fire in bursts "
+                   "and stay stuck to their emitter",
     "category": "Add Mesh",
 }
 

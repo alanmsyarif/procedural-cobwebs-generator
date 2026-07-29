@@ -23,7 +23,7 @@ from .constants import (
 )
 from .nodeutils import H, sock_in, minmax_sockets, set_modifier_input
 from .materials import (ensure_silk_material, ensure_dew_material,
-                        ensure_tension_material)
+                        ensure_tension_material, ensure_synth_material)
 
 
 def _build_group():
@@ -40,9 +40,13 @@ def _build_group():
     sock_in(iface, "Profile Resolution", 'NodeSocketInt',   6, 3, 16)
     sock_in(iface, "Smooth Segments",    'NodeSocketInt',   4, 1, 12)
     sock_in(iface, "Silk Material",      'NodeSocketMaterial')
+    sock_in(iface, "Synth Web",          'NodeSocketBool',  False)
+    sock_in(iface, "Synth Material",     'NodeSocketMaterial')
     sock_in(iface, "Show Tension",       'NodeSocketBool',  False)
     sock_in(iface, "Tension Material",   'NodeSocketMaterial')
-    sock_in(iface, "Enable Dew",         'NodeSocketBool',  True)
+    # off by default — dew is a simulated point cloud that costs frames on
+    # every strand, so it is opt-in rather than something you turn off
+    sock_in(iface, "Enable Dew",         'NodeSocketBool',  False)
     sock_in(iface, "Dew Per Span",       'NodeSocketFloat', 0.3, 0.0, 3.0)
     sock_in(iface, "Dew Amount",         'NodeSocketFloat', 0.25, 0.0, 1.0)
     sock_in(iface, "Dew Size",           'NodeSocketFloat', 0.004,
@@ -154,10 +158,18 @@ def _build_group():
     if "Scale" in c2m.inputs:
         h.lk(rmin.outputs["Value"], c2m.inputs["Scale"])
 
+    # natural silk -> synthetic web-fluid; the tension heatmap is a debug
+    # view, so it overrides whichever of the two is selected
+    web_sw = h.n("GeometryNodeSwitch", -50, -100,
+                 input_type='MATERIAL', label="synth web")
+    h.lk(g["Synth Web"], web_sw.inputs["Switch"])
+    h.lk(g["Silk Material"], web_sw.inputs["False"])
+    h.lk(g["Synth Material"], web_sw.inputs["True"])
+
     mat_sw = h.n("GeometryNodeSwitch", 100, -100,
                  input_type='MATERIAL', label="tension view")
     h.lk(g["Show Tension"], mat_sw.inputs["Switch"])
-    h.lk(g["Silk Material"], mat_sw.inputs["False"])
+    h.lk(web_sw.outputs["Output"], mat_sw.inputs["False"])
     h.lk(g["Tension Material"], mat_sw.inputs["True"])
 
     silk = h.n("GeometryNodeSetMaterial", 250, 100)
@@ -509,7 +521,7 @@ def _build_group():
     return nt
 
 
-STRANDIFY_VERSION = 10
+STRANDIFY_VERSION = 11
 
 
 def ensure_strandify_group():
@@ -530,7 +542,8 @@ def apply_strandify(obj):
     mod.node_group = group
     for sock_name, mat in (("Silk Material", ensure_silk_material()),
                            ("Dew Material", ensure_dew_material()),
-                           ("Tension Material", ensure_tension_material())):
+                           ("Tension Material", ensure_tension_material()),
+                           ("Synth Material", ensure_synth_material())):
         set_modifier_input(mod, group, sock_name, mat)
     # a Web Shot mesh carries per-point arrival frames — switch the reveal
     # on for it so the strands fly instead of appearing all at once

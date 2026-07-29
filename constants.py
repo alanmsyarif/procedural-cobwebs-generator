@@ -4,7 +4,7 @@
 # version in __init__.py. Blender caches imported modules, so copying new
 # files into the addons folder changes nothing until scripts are reloaded —
 # the panel showing an older build than the Add-ons list is how that shows.
-BUILD = "3.2.3 status-panel"
+BUILD = "3.5.2 shot-panel-tidy"
 
 #
 # NOTE: the `swf_` prefix on attributes and custom properties below is
@@ -21,6 +21,7 @@ GROUP_GPU_APPLY = "Arachne GPU Apply"
 MAT_SILK    = "Arachne Silk"
 MAT_DEW     = "Arachne Dew"
 MAT_TENSION = "Arachne Tension"
+MAT_SYNTH   = "Arachne Synth-Web"
 
 # Attributes (prefixed to avoid collisions with user data)
 A_PREV   = "swf_prev"       # POINT vector — previous position (verlet state)
@@ -41,6 +42,13 @@ A_EMIT    = "swf_emit"      # POINT bool   — muzzle anchor: rides the web
 # Mesh-datablock custom property: name of the object a Web Shot was fired
 # from. The GPU solver looks it up to carry A_EMIT points along with it.
 P_EMITTER = "swf_emitter"
+
+# Object custom property: name of the wind-field empty that feeds the web's
+# pull into Blender's rigid body sim (see gpu_solver's pull field).
+P_PULL = "swf_pull_field"
+
+# Name of that empty, formatted with the web object's name
+PULL_FIELD = "Arachne Pull %s"
 
 # Dew droplet physics state (POINT domain, on the droplet point cloud)
 A_DEW_HOME = "swf_dew_home"  # vector — birth position (respawn target)

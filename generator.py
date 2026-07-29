@@ -38,14 +38,29 @@ from .constants import A_PIN, A_SHOT, A_NOTEAR, A_EMIT, P_EMITTER
 _LIVE_PENDING = False
 
 
+def _live_ready(p):
+    """Whether a live rebuild may run right now.
+
+    A running GPU sim owns the mesh it was built from: regenerating swaps
+    in fresh data, `invalidate_state` drops the solver state and the sim
+    restarts from scratch. Live Update is for shaping the web *before* the
+    solver goes on, so once it is enabled the rebuild is skipped rather
+    than nuking the simulation. Dragging the emitter, the aim target or a
+    collider is a depsgraph tick per mouse move, so without this the web
+    restarts continuously while you drag."""
+    if p is None or not p.live or p.live_obj is None:
+        return False
+    g = getattr(p.live_obj, "swf_gpu", None)
+    return g is None or not g.enabled
+
+
 def _live_update(self, context):
     """Property update hook: schedule a live rebuild if Live Update is on
     and a generated web is being tracked."""
     global _LIVE_PENDING
     if _LIVE_PENDING:
         return
-    p = getattr(context.scene, "swf_web", None)
-    if p is None or not p.live or p.live_obj is None:
+    if not _live_ready(getattr(context.scene, "swf_web", None)):
         return
     _LIVE_PENDING = True
     bpy.app.timers.register(_live_timer, first_interval=0.0)
@@ -54,15 +69,17 @@ def _live_update(self, context):
 def schedule_live_update():
     """Ask for a live rebuild from outside a property callback — moving the
     emitter or the aim target changes the web just as much as any slider
-    does. Coalesced through the same one-shot timer."""
+    does. Coalesced through the same one-shot timer. Returns True if a
+    rebuild was queued, so callers can fall back to carrying anchors when
+    the solver is running and the rebuild is off the table."""
     global _LIVE_PENDING
     if _LIVE_PENDING:
-        return
-    p = getattr(bpy.context.scene, "swf_web", None)
-    if p is None or not p.live or p.live_obj is None:
-        return
+        return True
+    if not _live_ready(getattr(bpy.context.scene, "swf_web", None)):
+        return False
     _LIVE_PENDING = True
     bpy.app.timers.register(_live_timer, first_interval=0.0)
+    return True
 
 
 def _live_timer():
@@ -72,7 +89,9 @@ def _live_timer():
     _LIVE_PENDING = False
     context = bpy.context
     p = getattr(context.scene, "swf_web", None)
-    if p is None or not p.live or p.live_obj is None:
+    # re-checked here: the solver can be switched on between the schedule
+    # and this firing
+    if not _live_ready(p):
         return None
     try:
         regenerate_live(context, p)
@@ -91,7 +110,7 @@ class ARN_WebProps(PropertyGroup):
                ('SHOT', "Web Shot",
                 "Strands fired from an emitter over time, sticking where "
                 "they hit the selected geometry")],
-        default='ORB', update=_live_update)
+        default='SHOT', update=_live_update)
     cobweb_initial: IntProperty(
         name="Initial Lines", default=36, min=2, max=200,
         description="Anchor threads cast between the selected surfaces "
@@ -152,7 +171,7 @@ class ARN_WebProps(PropertyGroup):
                     "where it fired. GPU solver only",
         update=_live_update)
     shot_count: IntProperty(
-        name="Shots", default=14, min=1, max=400,
+        name="Shots", default=36, min=1, max=400,
         description="Number of strands fired per burst", update=_live_update)
     shot_bursts: IntProperty(
         name="Bursts", default=1, min=1, max=50,
@@ -168,7 +187,7 @@ class ARN_WebProps(PropertyGroup):
         description="Frame the first strand leaves the emitter",
         update=_live_update)
     shot_interval: FloatProperty(
-        name="Shot Interval", default=1.5, min=0.0, max=100.0,
+        name="Shot Interval", default=0.0, min=0.0, max=100.0,
         description="Frames between consecutive shots (0 = the whole "
                     "burst fires at once)", update=_live_update)
     shot_speed: FloatProperty(
@@ -188,13 +207,13 @@ class ARN_WebProps(PropertyGroup):
     shot_spread: FloatProperty(
         # ANGLE properties are stored in radians and only displayed in
         # degrees — bounds must be radians too
-        name="Spread", default=math.radians(35.0), min=0.0, max=math.pi,
+        name="Spread", default=0.0, min=0.0, max=math.pi,
         subtype='ANGLE',
         description="Cone angle the burst fans out over. 0 = every shot on "
                     "the same line, 180° = spray in all directions",
         update=_live_update)
     shot_whip: FloatProperty(
-        name="Whip", default=0.35, min=0.0, max=2.0,
+        name="Whip", default=0.0, min=0.0, max=2.0,
         description="Sideways wander the strand carries in flight — 0 = "
                     "dead straight lines, high = lashing arcs. Several "
                     "waves per strand, so no two bend alike",
@@ -207,19 +226,24 @@ class ARN_WebProps(PropertyGroup):
                     "from the muzzle, 0.8 = a tight blob that only bursts "
                     "open just before it lands", update=_live_update)
     shot_clot_size: FloatProperty(
-        name="Clot Thickness", default=0.03, min=0.001, max=2.0,
+        name="Clot Thickness", default=0.005, min=0.001, max=2.0,
         subtype='DISTANCE',
         description="Radius of the travelling clot. Keep it small — a thin "
                     "cord reads as one rope, and the threads binding the "
                     "fibres together stay invisible inside it",
         update=_live_update)
     shot_clot_twist: FloatProperty(
-        name="Clot Twist", default=1.5, min=0.0, max=12.0,
+        name="Clot Twist", default=4.0, min=0.0, max=12.0,
         description="Turns the strands braid around the clot's axis before "
                     "it opens. 0 = parallel cables, higher = a twisted, "
                     "knotted rope", update=_live_update)
+    # panel-only: no update hook, folding a section rebuilds nothing
+    shot_advanced: BoolProperty(
+        name="Advanced", default=False,
+        description="Flight shaping and impact splat — the dials you set "
+                    "once for a look and leave alone")
     shot_arc: FloatProperty(
-        name="Arc", default=0.5, min=-2.0, max=2.0,
+        name="Arc", default=0.0, min=-2.0, max=2.0,
         description="Lob: the strand rides up over the straight line and "
                     "drops onto the impact point, peaking about three "
                     "quarters of the way there — silk thrown rather than "
@@ -231,21 +255,21 @@ class ARN_WebProps(PropertyGroup):
                     "its length (the solver takes it from there)",
         update=_live_update)
     shot_splat: IntProperty(
-        name="Splat Strands", default=26, min=0, max=200,
+        name="Splat Strands", default=0, min=0, max=200,
         description="Silk sprayed across the surface where a shot lands: "
                     "radial strands running out from the impact point with "
                     "their tips stuck to the wall", update=_live_update)
     shot_splat_size: FloatProperty(
-        name="Splat Size", default=0.35, min=0.0, max=20.0,
+        name="Splat Size", default=0.0, min=0.0, max=20.0,
         subtype='DISTANCE',
         description="How far the splat spreads across the surface",
         update=_live_update)
     shot_splat_web: IntProperty(
-        name="Splat Web", default=16, min=0, max=200,
+        name="Splat Web", default=0, min=0, max=200,
         description="Chords knitted between neighbouring splat strands, "
                     "the webbing that fills the splat in", update=_live_update)
     shot_tangle: IntProperty(
-        name="Cross Threads", default=6, min=0, max=200,
+        name="Cross Threads", default=200, min=0, max=200,
         description="Extra strands strung between shots already fired, "
                     "webbing the burst together", update=_live_update)
 
@@ -305,10 +329,12 @@ class ARN_WebProps(PropertyGroup):
 
     # ---- realtime tweaking ------------------------------------------------
     live: BoolProperty(
-        name="Live Update", default=False,
+        name="Live Update", default=True,
         description="Rebuild the last generated web instantly as you tweak "
-                    "the parameters above. Do this before adding the "
-                    "solver — regenerating changes the topology",
+                    "the parameters above. Shaping happens before the "
+                    "solver goes on — regenerating changes the topology, so "
+                    "this is ignored once the GPU solver is enabled on the "
+                    "tracked web rather than restarting its simulation",
         update=_live_update)
     live_obj: PointerProperty(
         type=bpy.types.Object,

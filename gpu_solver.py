@@ -9,6 +9,7 @@ import numpy as np
 
 import bpy
 from bpy.app.handlers import persistent
+from mathutils import Vector
 from bpy.props import (
     BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty,
     IntProperty, PointerProperty,
@@ -17,6 +18,7 @@ from bpy.types import Operator, PropertyGroup
 
 from .constants import (
     GROUP_GPU_APPLY, A_PIN, A_SHOT, A_GPU_POS, A_BROKEN, A_TENSION,
+    P_PULL, PULL_FIELD,
 )
 from .nodeutils import H
 
@@ -54,6 +56,94 @@ _RENDER_WARNED = False
 
 def _cache_store(obj, frame, arrays):
     _CACHE.setdefault(obj.name, {})[frame] = arrays
+
+
+def _drop_state(name):
+    """Discard a simulation and its cache. Anything the web dragged the
+    collider to belongs to that simulation, so it goes back where it
+    started — otherwise each replay would begin from the end of the last."""
+    _STATES.pop(name, None)
+    _CACHE.pop(name, None)
+
+
+def _drop_all_states():
+    for name in list(_STATES):
+        _drop_state(name)
+    _CACHE.clear()
+
+
+# ---------------------------------------------------------------------------
+#  Web -> rigid body coupling
+# ---------------------------------------------------------------------------
+#
+# Blender exposes no way to apply a force to one rigid body from Python —
+# no force API, no velocity, nothing. The only in-scene mechanism is a
+# force field, so the web's pull is fed in as a WIND field: uniform, aimed
+# down the empty's local +Z, parked on the collider with a max distance
+# just large enough to reach it and nothing else in the scene.
+#
+# Two consequences worth knowing. The field is set from a frame-change
+# handler, which runs after the depsgraph has already evaluated Bullet for
+# that frame, so the pull lands one frame later — invisible in motion, but
+# it is why this wants playing forward from frame 1 rather than scrubbing.
+# And Bullet only simulates onto frames its point cache has not reached, so
+# a stale rigid body cache means the object will not budge; the setup
+# operator clears it.
+
+
+def _world_radius(o):
+    """Radius of the object's world-space bounding box, about its centre."""
+    pts = [o.matrix_world @ Vector(c) for c in o.bound_box]
+    mid = sum(pts, Vector()) / len(pts)
+    return max((p - mid).length for p in pts), mid
+
+
+def _pull_field(obj):
+    """The web's wind-field empty, or None. Lookup only — creating it needs
+    operators, which a frame handler must not run (see ARN_OT_setup_pull)."""
+    name = obj.get(P_PULL)
+    emp = bpy.data.objects.get(name) if name else None
+    if emp is None or getattr(emp, "field", None) is None:
+        return None
+    return emp
+
+
+def _zero_pull(obj):
+    """Switch the pull off. Needed on every frame the web is not stepped —
+    a reset or a scrub leaves the field at whatever strength the last
+    simulated frame set, and Bullet would go on hauling the object with a
+    force from a web that no longer exists."""
+    emp = _pull_field(obj)
+    if emp is not None:
+        emp.field.strength = 0.0
+
+
+def _update_pull(obj, g, st):
+    """Point the pull field along the web's net force on the collider and
+    scale it to match. Pure data writes, safe from the frame handler."""
+    emp = _pull_field(obj)
+    if emp is None:
+        return
+    coll = g.collider
+    rb = getattr(coll, "rigid_body", None) if coll is not None else None
+    force = st.pull_force(g) if g.pull_collider else None
+    if rb is None or rb.type != 'ACTIVE' or force is None:
+        emp.field.strength = 0.0
+        return
+    mag = float(np.linalg.norm(force))
+    if mag < 1e-9:
+        emp.field.strength = 0.0
+        return
+
+    radius, mid = _world_radius(coll)
+    # sit on the collider so it is certainly in range, and keep the reach
+    # tight — every other active rigid body inside it would feel this too
+    emp.location = mid
+    emp.rotation_mode = 'QUATERNION'
+    emp.rotation_quaternion = Vector((0.0, 0.0, 1.0)).rotation_difference(
+        Vector(force / mag))
+    emp.field.distance_max = max(radius * 1.5, 1e-3)
+    emp.field.strength = mag
 
 
 def _cache_apply(obj, frame):
@@ -141,10 +231,21 @@ def _on_frame(scene, depsgraph=None):
                 st = _reset_state(obj, g, dt)
                 st.last_frame = frame
                 _cache_store(obj, frame, st.write_back(obj))
+                # rewinding starts a fresh web: drop the pull the previous
+                # run left standing, or the object is already moving on
+                # frame 1 under a force nothing is exerting any more
+                _zero_pull(obj)
             elif st.last_frame is not None and frame == st.last_frame + 1:
                 st.step(obj, g, dt)
                 st.last_frame = frame
-                _cache_store(obj, frame, st.write_back(obj))
+                arrays = st.write_back(obj)
+                # after write_back: it leaves the readbacks pull_force
+                # needs. Only on stepped frames — a scrub must not shove
+                # the rigid body around without simulating the web.
+                # Unconditional: it zeroes the field when pull is off, so
+                # switching the toggle mid-playback lets go immediately
+                _update_pull(obj, g, st)
+                _cache_store(obj, frame, arrays)
             else:
                 # scrubbing: the sim only advances on consecutive frames, so
                 # the web holds — but anchors are kinematic, so keep them on
@@ -153,6 +254,7 @@ def _on_frame(scene, depsgraph=None):
                 st.last_frame = frame
                 st.carry(obj)
                 st.write_back(obj)
+                _zero_pull(obj)          # no step, no pull
         except Exception as ex:      # never break playback
             gpu_native._mark_broken(ex)
 
@@ -194,8 +296,10 @@ def _on_depsgraph(scene, depsgraph=None):
                 and p.live_obj is not None
                 and (_moved(p.shot_emitter) | _moved(p.shot_aim))):
             from .generator import schedule_live_update
-            schedule_live_update()
-            return
+            # declines once the solver owns the mesh — fall through to
+            # carrying the anchors instead of restarting the simulation
+            if schedule_live_update():
+                return
         for obj in scene.objects:
             g = getattr(obj, "swf_gpu", None)
             if g is None or not g.enabled or obj.type != 'MESH':
@@ -283,8 +387,7 @@ def invalidate_state(obj):
     the topology (Clot, Arc, Slack, Stick To Emitter...) would otherwise go
     on being simulated — and displayed — from the old bind, and the change
     would look like it did nothing. Rebinding happens on the next frame."""
-    _STATES.pop(obj.name, None)
-    _CACHE.pop(obj.name, None)
+    _drop_state(obj.name)
     g = getattr(obj, "swf_gpu", None)
     if g is None or not g.enabled or obj.type != 'MESH':
         return
@@ -335,20 +438,32 @@ def enable_gpu_solver(context, obj, collider=None):
     if collider is not None:
         g.collider = collider
     g.enabled = True
-    _STATES.pop(obj.name, None)
-    _CACHE.pop(obj.name, None)
+    _drop_state(obj.name)
 
 
 # ---------------------------------------------------------------------------
 #  Properties + operators
 # ---------------------------------------------------------------------------
 
+def _static_update(self, context):
+    """Keep the Static toggle and the collider's rigid body type in step —
+    Passive is Bullet's own word for 'holds things but never moves'."""
+    rb = getattr(self.collider, "rigid_body", None) if self.collider else None
+    if rb is not None:
+        rb.type = 'PASSIVE' if self.collider_static else 'ACTIVE'
+
+
 class ARN_GPUProps(PropertyGroup):
     enabled: BoolProperty(name="Enabled", default=False)
     tension: FloatProperty(
-        name="Tension", default=0.8, min=0.0, max=1.0,
-        description="1 = taut threads, lower = slack that droops into "
-                    "catenaries (rest lengths carry built-in slack)")
+        name="Tension", default=0.8, min=0.0, max=2.0,
+        description="1 = taut threads, rest lengths exactly as built; "
+                    "lower = slack that droops into catenaries. Above 1 "
+                    "pre-tensions the silk — rest lengths shorter than "
+                    "built, so the threads keep pulling and the last of the "
+                    "gravity droop comes out (2 = 15% shorter). Raise Tear "
+                    "Threshold to match: pre-tensioned threads start out "
+                    "closer to snapping")
     resist_compression: BoolProperty(
         name="Resist Compression", default=False,
         description="Off = silk-like unilateral constraints (threads pull "
@@ -392,6 +507,25 @@ class ARN_GPUProps(PropertyGroup):
         name="Collider", type=bpy.types.Object,
         description="Collision object (sphere approximation or baked "
                     "mesh SDF depending on Shape)")
+    pull_collider: BoolProperty(
+        name="Web Pulls Collider", default=False,
+        description="Two-way coupling: threads stuck to the Collider haul "
+                    "it around instead of only being held by it — fire a "
+                    "web shot at a prop and drag it over. The object is "
+                    "moved by Blender's rigid body sim, so its mass, "
+                    "friction, gravity and tumble come from the Physics "
+                    "tab. Single Collider object, not collections")
+    pull_strength: FloatProperty(
+        name="Pull Strength", default=200.0, min=0.0, max=100000.0,
+        description="Scales thread stretch into force field strength. The "
+                    "main dial: raise it if the web tugs but nothing moves. "
+                    "Not newtons — rigid body force fields have no physical "
+                    "unit, so tune it by eye")
+    collider_static: BoolProperty(
+        name="Static", default=False, update=_static_update,
+        description="Make the collider a Passive rigid body — it holds the "
+                    "web but the web can never move it. Off = Active, free "
+                    "to be pulled")
     collider_collection: PointerProperty(
         name="Collider Collection", type=bpy.types.Collection,
         description="Collide against every mesh in this collection "
@@ -440,6 +574,84 @@ class ARN_OT_add_gpu_solver(Operator):
         return {'FINISHED'}
 
 
+class ARN_OT_setup_pull(Operator):
+    """Set up rigid body pulling: makes the Collider an Active rigid body
+    and builds the force field the web drives it with. Run once, then play
+    from frame 1"""
+    bl_idname = "arachne.setup_pull"
+    bl_label = "Set Up Rigid Body Pull"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.object
+        return (obj is not None and obj.type == 'MESH'
+                and getattr(obj, "swf_gpu", None) is not None
+                and obj.swf_gpu.collider is not None)
+
+    def execute(self, context):
+        obj = context.object
+        g = obj.swf_gpu
+        coll = g.collider
+        scene = context.scene
+
+        if g.collider_collection is not None:
+            self.report({'ERROR'},
+                        "Rigid body pull works on a single Collider object, "
+                        "not a collection — clear Collider Collection.")
+            return {'CANCELLED'}
+
+        if scene.rigidbody_world is None:
+            bpy.ops.rigidbody.world_add()
+        rbw = scene.rigidbody_world
+
+        # the collider becomes an Active body so Bullet can move it
+        if coll.rigid_body is None:
+            with context.temp_override(object=coll, active_object=coll,
+                                       selected_objects=[coll]):
+                bpy.ops.rigidbody.object_add()
+        coll.rigid_body.type = 'PASSIVE' if g.collider_static else 'ACTIVE'
+
+        emp = _pull_field(obj)
+        if emp is None:
+            emp = bpy.data.objects.new(PULL_FIELD % obj.name, None)
+            emp.empty_display_type = 'SINGLE_ARROW'
+            emp.empty_display_size = 0.35
+            emp.hide_render = True
+            scene.collection.objects.link(emp)
+            with context.temp_override(object=emp, active_object=emp,
+                                       selected_objects=[emp]):
+                bpy.ops.object.forcefield_toggle()
+            obj[P_PULL] = emp.name
+        if emp.field is None:
+            self.report({'ERROR'}, "Could not add a force field.")
+            return {'CANCELLED'}
+        # WIND is the only uniform, directional field — everything else
+        # falls off or swirls, and the web pulls in a straight line
+        emp.field.type = 'WIND'
+        emp.field.falloff_power = 0.0
+        emp.field.use_max_distance = True
+        emp.field.strength = 0.0
+
+        # a scene that limits which effectors reach its rigid bodies would
+        # otherwise ignore ours
+        eff = rbw.effector_weights.collection
+        if eff is not None and emp.name not in eff.objects:
+            eff.objects.link(emp)
+
+        # Bullet will not re-simulate frames its cache already holds
+        try:
+            with context.temp_override(point_cache=rbw.point_cache):
+                bpy.ops.ptcache.free_bake()
+        except Exception:
+            pass
+
+        g.pull_collider = True
+        self.report({'INFO'},
+                    "Rigid body pull ready — play from frame 1.")
+        return {'FINISHED'}
+
+
 class ARN_OT_remove_gpu_solver(Operator):
     """Disable the GPU solver and remove its apply modifier"""
     bl_idname = "arachne.remove_gpu_solver"
@@ -453,8 +665,7 @@ class ARN_OT_remove_gpu_solver(Operator):
     def execute(self, context):
         obj = context.object
         obj.swf_gpu.enabled = False
-        _STATES.pop(obj.name, None)
-        _CACHE.pop(obj.name, None)
+        _drop_state(obj.name)
         for m in list(obj.modifiers):
             if (m.type == 'NODES' and m.node_group
                     and m.node_group.name.startswith(GROUP_GPU_APPLY)):
@@ -469,8 +680,7 @@ class ARN_OT_reset_gpu(Operator):
     bl_label = "Reset GPU Sim"
 
     def execute(self, context):
-        _STATES.clear()
-        _CACHE.clear()
+        _drop_all_states()
         from . import gpu_native
         gpu_native._clear_broken()
         return {'FINISHED'}
@@ -515,13 +725,12 @@ class ARN_OT_pin_vertices(Operator):
                     attr.data[v.index].value = val
         if was_edit:
             bpy.ops.object.mode_set(mode='EDIT')
-        _STATES.pop(obj.name, None)   # pins bake into the sim state
-        _CACHE.pop(obj.name, None)
+        _drop_state(obj.name)         # pins bake into the sim state
         return {'FINISHED'}
 
 
-classes = (ARN_GPUProps, ARN_OT_add_gpu_solver, ARN_OT_remove_gpu_solver,
-           ARN_OT_reset_gpu, ARN_OT_pin_vertices)
+classes = (ARN_GPUProps, ARN_OT_add_gpu_solver, ARN_OT_setup_pull,
+           ARN_OT_remove_gpu_solver, ARN_OT_reset_gpu, ARN_OT_pin_vertices)
 
 
 def _safe_register(cls):

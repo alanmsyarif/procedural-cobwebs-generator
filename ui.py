@@ -254,24 +254,38 @@ class ARN_PT_main(Panel):
             col.prop(p, "shot_start")
             col.prop(p, "shot_interval")
             col.prop(p, "shot_speed")
-            col.prop(p, "shot_range")
+            # an Aim Target sets the reach itself, far enough to arrive and
+            # no farther, so Range has nothing to say
+            row = col.row()
+            row.enabled = p.shot_aim is None
+            row.prop(p, "shot_range")
             col.prop(p, "shot_spread")
             col.separator()
             col.prop(p, "shot_clot")
             col.prop(p, "shot_clot_size")
             col.prop(p, "shot_clot_twist")
-            col.prop(p, "shot_arc")
-            col.prop(p, "shot_whip")
-            col.prop(p, "shot_slack")
-            col.separator()
-            col.prop(p, "shot_splat")
-            col.prop(p, "shot_splat_size")
-            col.prop(p, "shot_splat_web")
             col.separator()
             col.prop(p, "shot_tangle")
             col.prop(p, "jitter")
             col.prop(p, "detail")
             col.prop(p, "seed")
+
+            col.separator()
+            adv = col.box()
+            adv.prop(p, "shot_advanced", emboss=False,
+                     icon='TRIA_DOWN' if p.shot_advanced else 'TRIA_RIGHT')
+            if p.shot_advanced:
+                sub = adv.column(align=True)
+                sub.prop(p, "shot_arc")
+                sub.prop(p, "shot_whip")
+                sub.prop(p, "shot_slack")
+                sub.separator()
+                sub.prop(p, "shot_splat")
+                spl = sub.column(align=True)
+                spl.enabled = p.shot_splat > 0
+                spl.prop(p, "shot_splat_size")
+                spl.prop(p, "shot_splat_web")
+
             col.label(text="Select what the shots hit.", icon='INFO')
             col.label(text="Shots fly once the solver or strands are on.",
                       icon='INFO')
@@ -297,11 +311,19 @@ class ARN_PT_main(Panel):
         row = col.row(align=True)
         row.prop(p, "live", toggle=True, icon='MOD_TIME')
         if p.live:
-            if p.live_obj is not None:
-                row.label(text="", icon='CHECKMARK')
-            else:
+            lg = getattr(p.live_obj, "swf_gpu", None)
+            if p.live_obj is None:
                 col.label(text="Generate a web to tweak it live.",
                           icon='INFO')
+            elif lg is not None and lg.enabled:
+                # rebuilding would swap the mesh out from under the running
+                # sim, so live update stands down — say so instead of
+                # looking broken
+                row.label(text="", icon='LOCKED')
+                col.label(text="Solver running — remove it to tweak live.",
+                          icon='INFO')
+            else:
+                row.label(text="", icon='CHECKMARK')
         col.operator("arachne.full_setup", icon='PLAY')
 
         box = layout.box()
@@ -338,6 +360,35 @@ class ARN_PT_main(Panel):
             col.prop(g, "friction")
             col.prop(g, "stickiness")
             col.prop(g, "stick_follow")
+            col.separator()
+            col.prop(g, "pull_collider")
+            if g.pull_collider:
+                single = g.collider is not None and not g.collider_collection
+                rb = getattr(g.collider, "rigid_body", None) if single else None
+                sub = col.column(align=True)
+                sub.enabled = single
+                sub.prop(g, "collider_static")
+                sub.prop(g, "pull_strength")
+                # mass and friction belong to Bullet — surfaced here so the
+                # dials that matter are in one place, not two tabs apart
+                if rb is not None:
+                    mov = sub.column(align=True)
+                    mov.enabled = not g.collider_static
+                    mov.prop(rb, "mass")
+                    mov.prop(rb, "friction")
+                    mov.prop(rb, "linear_damping", text="Drag")
+                col.operator("arachne.setup_pull", icon='PHYSICS')
+                # the web can only pull through anchors welded to the
+                # collider, and those exist only while it rides it
+                if not single:
+                    col.label(text="Needs a single Collider object.",
+                              icon='ERROR')
+                elif rb is None:
+                    col.label(text="Run Set Up Rigid Body Pull.",
+                              icon='ERROR')
+                elif not g.stick_follow:
+                    col.label(text="Turn on Stuck Follows Collider.",
+                              icon='ERROR')
             col.separator()
             col.prop(g, "enable_tearing")
             col.prop(g, "tear_threshold")
