@@ -1,7 +1,7 @@
 # Arachne
 
 Procedural spider webs for Blender, with a GPU tearing solver. Generate a
-web, simulate it with silk-like physics on your GPU, render it as strands —
+web, simulate it with silk-like physics on your GPU, render it as strands
 all from one panel. No dependencies.
 
 Minimum Blender 5.2 LTS.
@@ -14,7 +14,7 @@ Minimum Blender 5.2 LTS.
 
 ## Quick start
 
-1. *(Optional)* Select a mesh — the collider, or in Chaotic Cobweb mode the
+1. *(Optional)* Select a mesh the collider, or in Chaotic Cobweb mode the
    geometry the web anchors to.
 2. **Create Web + Sim + Strands**.
 3. Rewind to frame 1, press play. Push the collider through the web.
@@ -24,35 +24,35 @@ vertices → **Pin / Unpin**.
 
 ## Web types
 
-**Orb Web** — classic radial/spiral web. Scalloped sag, uneven spiral
+**Orb Web** classic radial/spiral web. Scalloped sag, uneven spiral
 spacing, damage gaps, asymmetry, wavy radials, tangle threads.
 
-**Chaotic Cobweb** — spider-spun 3D webbing anchored to your scene
+**Chaotic Cobweb** spider-spun 3D webbing anchored to your scene
 geometry (Pixar *Toy Story 4* construction). Select a corner, prop or room
 and simulated spiders spin between the surfaces.
 
-- **Spread** — 0 = dense local clumps, 1 = even coverage.
-- **Clumping** — draws spiders to random attractors: dense knots, sparse
+- **Spread** 0 = dense local clumps, 1 = even coverage.
+- **Clumping** draws spiders to random attractors: dense knots, sparse
   spans between.
-- **Bridge Bias** — 0 = webbing hugging each surface, 1 = long cables
+- **Bridge Bias** 0 = webbing hugging each surface, 1 = long cables
   strung between separate pieces.
 
-**Web Shot** — strands fired from an emitter over time. Each shot leaves at
+**Web Shot** strands fired from an emitter over time. Each shot leaves at
 its own frame, flies at **Shot Speed**, sticks where it hits. A miss keeps
 a free end that whips.
 
-- **Emitter** — its animated location is sampled per shot, so a moving hand
+- **Emitter** its animated location is sampled per shot, so a moving hand
   leaves each strand anchored where it fired. Unset = 3D cursor.
-- **Aim Target** — fire at it. Always part of the hit test, and it sets the
+- **Aim Target** fire at it. Always part of the hit test, and it sets the
   range: shots reach it however far it is, and wide ones stop level with it
   instead of sailing past.
-- **Bursts / Burst Gap** — the emitter fires more than once. Each volley is
+- **Bursts / Burst Gap** the emitter fires more than once. Each volley is
   built fresh from the emitter's location at that moment, with its own
   clot, lashing and cross threads.
-- **Stick To Emitter** — the muzzle end rides the emitter as it moves and
+- **Stick To Emitter** the muzzle end rides the emitter as it moves and
   turns, so the silk trails the hand that shot it. GPU solver, no collider
   needed.
-- **Splat / Cross Threads / Whip** — impact spray across the surface, silk
+- **Splat / Cross Threads / Whip** impact spray across the surface, silk
   strung between shots already in the air, in-flight bend.
 
 Unfired strands are frozen until their shot goes off, so nothing has sagged
@@ -62,7 +62,7 @@ before it flies.
 
 On by default. Every parameter rebuilds the tracked web as you drag, so you
 can dial in the look before simulating. Moving the Emitter or Aim Target
-counts as a change too — where the emitter is decides where every strand
+counts as a change too where the emitter is decides where every strand
 starts.
 
 **It stands down once the GPU solver is on that web.** Regenerating swaps
@@ -70,35 +70,35 @@ the mesh out and would restart the sim from scratch on every mouse move.
 The panel shows a lock. To reshape topology again, remove the solver.
 
 With the solver running, dragging the collider or emitter still carries the
-anchors along — the web reacts without restarting.
+anchors along the web reacts without restarting.
 
 ## GPU solver
 
-Built on Blender's native GPU module — nothing to install.
+Built on Blender's native GPU module nothing to install.
 
 - Verlet / PBD with tearing: threads snap when overstretched
 - Unilateral silk constraints (threads pull, never push)
-- **Tension** — 0 = drooping catenaries, 1 = taut (rest lengths as built),
+- **Tension** 0 = drooping catenaries, 1 = taut (rest lengths as built),
   above 1 pre-tensions the silk so the last of the gravity droop comes out
   (2 = rest lengths 15% shorter than built)
 - World-space gravity and wind with turbulence
 - Collision: bounding sphere (fast) or baked mesh SDF, against one object
   or a whole **collider collection** (merged into one field)
-- **Stickiness** — a tunable fraction of contacting points latch to the
+- **Stickiness** a tunable fraction of contacting points latch to the
   surface, so the web drapes and clings instead of sliding off
-- **Stuck Follows Collider** — anchors on a collider ride its rigid motion,
+- **Stuck Follows Collider** anchors on a collider ride its rigid motion,
   rotation included. Per object in a collection, so the web stretches as
   the pieces move apart. Collision for a collection is still a static bake;
   only the attachments track motion.
-- **Web Pulls Collider** — two-way coupling into Blender's rigid body sim.
+- **Web Pulls Collider** two-way coupling into Blender's rigid body sim.
   Threads stuck to the collider haul it around instead of only being held
   by it: fire a shot at a prop and drag it over. Mass, friction, gravity
   and tumble are Bullet's, straight off the Physics tab; **Pull Strength**
   scales thread stretch into force, and **Static** makes the body Passive.
-  Hit **Set Up Rigid Body Pull** once, then play from frame 1 — see
+  Hit **Set Up Rigid Body Pull** once, then play from frame 1 see
   [Tips](#tips).
 - **Deteriorate** (pre-broken threads), **Pre-warm** (starts settled)
-- Render-safe frame cache — see [Rendering](#rendering)
+- Render-safe frame cache see [Rendering](#rendering)
 
 ## Rendering
 
@@ -111,7 +111,7 @@ noisy radius). Three materials, switched on the modifier:
 | **Synth Web** | Synthetic web-fluid: a shear-thinning polymer that air-cures on contact. Nylon-like monofilament — cured skin over a milky core, chalk bloom where the esters break it down |
 | **Show Tension** | Stretch heatmap, blue (rest) to red (about to tear) |
 
-**Dew droplets** are off by default — tick **Enable Dew**. They cling to
+**Dew droplets** are off by default tick **Enable Dew**. They cling to
 strands, condense and grow, slide under the silk, then drip off and
 free-fall once heavy enough, respawning at their birth spot. Droplets on
 torn strands are flung off.
@@ -125,18 +125,18 @@ its own disk bake. The bake fills both.
 
 - **Tension** ~0.95 for taut structural webs, ~0.5 for droopy abandoned
   ones. Pair low tension with **Deteriorate** for the aged look. Rest
-  lengths bake at sim start — reset or return to frame 1 after changing it.
+  lengths bake at sim start reset or return to frame 1 after changing it.
 - Going above Tension 1 shortens rest lengths, so threads start closer to
   snapping. Raise **Tear Threshold** to match.
 - **Shot Speed** against your frame rate: 60 m/s at 24 fps crosses 2.5 m
   per frame, so short shots land in one or two frames. Drop to 10–20 to
   actually see the strand travel.
-- Play Web Shots **from frame 1** — the reveal is driven by the current
+- Play Web Shots **from frame 1** the reveal is driven by the current
   frame, not the sim. Keep **Pre-warm Frames** at 0 (adding the solver to a
   shot web does this, along with Tension 0.95) so early shots aren't
   already settled.
 - A clot that unravels seconds after firing is *tearing*, not the Clot
-  settings — the oldest burst goes first because it has hung longest. Raise
+  settings the oldest burst goes first because it has hung longest. Raise
   **Tear Threshold** (1.5 → 4–6), or turn tearing off, or lower Tension.
 - Single splat on a wall: Shots 1, Spread 0°, Shot Speed ~20, an Emitter
   and an Aim Target, Splat Size to taste. The wall must **not** be the
@@ -147,7 +147,7 @@ its own disk bake. The bake fills both.
   Resolution for thin or detailed colliders.
 - Fast collider tunnelling through without tearing → raise **Substeps**.
 - **Web Pulls Collider** works through anchors welded to the collider, so
-  it needs **Stuck Follows Collider** on — without that nothing is attached
+  it needs **Stuck Follows Collider** on without that nothing is attached
   to pull with. Run **Set Up Rigid Body Pull** once (it makes the collider
   an Active rigid body and builds the force field), then **play forward
   from frame 1**: Bullet won't re-simulate frames its cache already holds,
