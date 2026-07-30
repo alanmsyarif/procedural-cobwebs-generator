@@ -1,7 +1,7 @@
 # Arachne
 
 Procedural spider webs for Blender, with a GPU tearing solver. Generate a
-web, simulate it with silk-like physics on your GPU, render it as strands —
+web, simulate it with silk-like physics on your GPU, render it as strands
 all from one panel. No dependencies.
 
 Minimum Blender 5.2 LTS.
