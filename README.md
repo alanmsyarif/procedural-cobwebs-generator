@@ -122,10 +122,10 @@ noisy radius). Three materials, switched on the modifier:
 | | |
 |---|---|
 | **Silk** (default) | Dusty translucent natural silk, visible at grazing angles |
-| **Synth Web** | Synthetic web-fluid: shear-thinning, virtually solid at rest and turned fluid only by being fired, knitting into a nylon-related fibre on contact with air. Adhesion fades as it sets — fresh thread reads wet and tacky, then goes matte and opaque, then blooms with ester powder. Timed by **Cure Frames** in the node tree (36 = 1.5 s at 24fps) |
+| **Synth Web** | Synthetic web-fluid: shear-thinning, virtually solid at rest and turned fluid only by being fired, knitting into a nylon-related fibre on contact with air. Adhesion fades as it sets fresh thread reads wet and tacky, then goes matte and opaque, then blooms with ester powder. Timed by **Cure Frames** in the node tree (36 = 1.5 s at 24fps) |
 | **Show Tension** | Stretch heatmap, blue (rest) to red (about to tear) |
 
-**Dew droplets** are off by default — tick **Enable Dew**. They cling to
+**Dew droplets** are off by default tick **Enable Dew**. They cling to
 strands, condense and grow, slide under the silk, then drip off and
 free-fall once heavy enough, respawning at their birth spot. Droplets on
 torn strands are flung off.
