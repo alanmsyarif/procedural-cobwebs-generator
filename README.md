@@ -88,7 +88,7 @@ anchors along the web reacts without restarting.
 
 ## GPU solver
 
-Built on Blender's native GPU module — nothing to install.
+Built on Blender's native GPU module nothing to install.
 
 - Verlet / PBD with tearing: threads snap when overstretched
 - Unilateral silk constraints (threads pull, never push)
