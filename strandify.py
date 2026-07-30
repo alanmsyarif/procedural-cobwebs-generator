@@ -279,6 +279,12 @@ def _build_group():
                     gdn.outputs["Value"])
     gtan = h.vm('SUBTRACT', 2450, -2300, (0.0, 0.0, -1.0),
                 gnrm.outputs["Vector"])
+    # g - n(g.n) is |sin(angle to gravity)| long, not unit: the raw vector
+    # slides a droplet at full speed on the tube's flank and stalls it near
+    # the top and bottom, so speed swung with whichever facet it sat on.
+    # Direction only — the speed below is the whole speed.
+    gtann = h.vm('NORMALIZE', 2650, -2300, gtan.outputs["Vector"],
+                 label="slide direction")
     # slide speed ~ 0.5 m/s * size * Dew Slide (heavy drops slide sooner)
     slide0 = h.ma('MULTIPLY', 2450, -2500, dsize_a.outputs["Attribute"],
                   g["Dew Slide"])
@@ -286,9 +292,40 @@ def _build_group():
     phys_gate = h.ma('MULTIPLY', 2650, -2700, slide1.outputs["Value"],
                      g["Dew Physics"], label="physics gate")
     slide2 = h.ma('MULTIPLY', 2850, -2500, phys_gate.outputs["Value"], ddt)
-    slide = h.vscale(3050, -2400, gtan.outputs["Vector"],
-                     slide2.outputs["Value"], label="slide step")
-    p_att = h.vm('ADD', 3250, -2300, dsns_p.outputs["Value"],
+
+    # Normalizing costs stability where the tangent is short — directly on
+    # top of the tube or right underneath it, g_t is nearly zero and its
+    # direction is float noise, which NORMALIZE then blows up to unit
+    # length. A droplet hanging under a strand would take a full-speed step
+    # in a random direction every frame. Fade the speed out over the last
+    # of the tangent's length instead: it recovers the old behaviour at the
+    # poles (a drop underneath has nowhere to slide around to, so it hangs)
+    # while keeping constant speed everywhere it actually travels.
+    glen = h.vm('LENGTH', 2650, -2150, gtan.outputs["Vector"])
+    fade = h.n("ShaderNodeMapRange", 2850, -2150, label="pole fade")
+    fade.inputs["From Min"].default_value = 0.05
+    fade.inputs["From Max"].default_value = 0.25
+    h.lk(glen.outputs["Value"], fade.inputs["Value"])
+    slide3 = h.ma('MULTIPLY', 3050, -2500, slide2.outputs["Value"],
+                  fade.outputs["Result"])
+    slide = h.vscale(3050, -2400, gtann.outputs["Vector"],
+                     slide3.outputs["Value"], label="slide step")
+
+    # Cling by relaxing toward the tube instead of snapping onto it. The
+    # profile is a 6-gon, so Input Normal hands back flat facet normals: a
+    # droplet parked exactly on the surface sits on a facet boundary, the
+    # nearest-face query flip-flops between the two neighbours frame to
+    # frame, and the tangent — - and so the slide — flips with it. Landing
+    # part-way keeps it off the boundary and low-passes the facet pops that
+    # remain, which is the jitter. Fast enough to still ride a deforming
+    # web; `lost` above still measures the true surface distance.
+    to_surf = h.vm('SUBTRACT', 2900, -2150, dsns_p.outputs["Value"],
+                   dpos.outputs["Position"])
+    pull = h.vscale(3050, -2150, to_surf.outputs["Vector"], 0.5,
+                    label="cling")
+    p_cling = h.vm('ADD', 3200, -2150, dpos.outputs["Position"],
+                   pull.outputs["Vector"])
+    p_att = h.vm('ADD', 3400, -2300, p_cling.outputs["Vector"],
                  slide.outputs["Vector"], label="attached pos")
 
     # free fall: verlet with slight drag
@@ -468,6 +505,14 @@ def _build_group():
     ico.inputs["Radius"].default_value = 1.0
     ico.inputs["Subdivisions"].default_value = 2
 
+    # A subdiv-2 ico reads as a faceted rock at droplet scale. Smoothed on
+    # the primitive rather than after Realize, so the flag is set on 80
+    # faces once instead of on every droplet in the web. Plain shade smooth,
+    # not Smooth by Angle: a sphere has no crease to preserve.
+    smooth = h.n("GeometryNodeSetShadeSmooth", 5100, -1150)
+    h.lk(ico.outputs["Mesh"], smooth.inputs["Geometry"])
+    smooth.inputs["Shade Smooth"].default_value = True
+
     # render radius grows with simulated size; falling drops stretch into
     # a teardrop along world Z
     sb0 = h.ma('MULTIPLY', 5500, -1100, size_r.outputs["Attribute"], 1.5)
@@ -499,7 +544,7 @@ def _build_group():
 
     iop = h.n("GeometryNodeInstanceOnPoints", 5250, -700)
     h.lk(cdel.outputs["Geometry"], iop.inputs["Points"])
-    h.lk(ico.outputs["Mesh"], iop.inputs["Instance"])
+    h.lk(smooth.outputs["Geometry"], iop.inputs["Instance"])
     h.lk(dscale.outputs["Vector"], iop.inputs["Scale"])
 
     real = h.n("GeometryNodeRealizeInstances", 5500, -700)
@@ -521,7 +566,7 @@ def _build_group():
     return nt
 
 
-STRANDIFY_VERSION = 11
+STRANDIFY_VERSION = 12
 
 
 def ensure_strandify_group():

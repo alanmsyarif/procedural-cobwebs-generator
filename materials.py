@@ -5,7 +5,8 @@
 
 import bpy
 
-from .constants import MAT_SILK, MAT_DEW, MAT_TENSION, MAT_SYNTH, A_TENSION
+from .constants import (MAT_SILK, MAT_DEW, MAT_TENSION, MAT_SYNTH,
+                        A_TENSION, A_SHOT)
 
 
 def _first_input(node, *names):
@@ -149,79 +150,164 @@ def ensure_tension_material():
     return mat
 
 
+SYNTH_VERSION = 2
+
+
 def ensure_synth_material():
-    """Synthetic web-fluid: a shear-thinning polymer that stays liquid under
-    pressure in the cartridge and air-cures the instant it clears the nozzle.
+    """Synthetic web-fluid, shaded to the published chemistry.
 
-    Shaded as a nylon-like monofilament rather than natural silk — an
-    IOR 1.53 cured skin (coat) over a milky, faintly translucent core,
-    smooth where silk is dusty. Two details sell the chemistry:
+    The fluid is shear-thinning: virtually solid at rest in the cartridge,
+    turned fluid only by the shearing force of being fired — which is why
+    the shooter never clogs. On contact with air the long-chain polymer
+    knits into a tough, flexible, nylon-related fibre.
 
-      * high-frequency noise in the bump — the fibre knits from a bundle of
-        extruded filaments, so the surface is textured, not glassy
-      * a chalk bloom at grazing angles (Layer Weight -> Facing) driving both
-        base colour and roughness — the ester breakdown that powders the web
-        and dissolves it an hour or two after it is fired
+    Two properties are time-dependent, and both are driven here by how long
+    a thread has been in the air (`swf_shot_t` against the current frame,
+    the same per-point fire time the shot reveal uses):
+
+      * adhesion falls off rapidly once exposed. Fresh fibre still reads wet
+        and tacky — glossy, a thicker cured skin, more light through it. As
+        it sets it goes matte and opaque.
+      * imbibed esters break the solid down into powder after an hour or
+        two. That is far past any shot animation, so it lands here as a
+        chalk bloom that only starts once the fibre has set, strongest at
+        grazing angles where a dusting would catch the light.
+
+    "Cure Frames" sets how long that takes on screen — 36 frames by
+    default, which is a second and a half at 24fps. Comic-accurate would be
+    hours; this is the readable version.
+
+    Shader nodes have no scene-time input, so the current frame arrives
+    through a driver on the "Arachne Frame" value node.
     """
     mat = bpy.data.materials.get(MAT_SYNTH)
-    if mat:
+    if mat is not None and mat.get("swf_version", 0) >= SYNTH_VERSION:
         return mat
-    mat = bpy.data.materials.new(MAT_SYNTH)
+    # Rebuilt in place rather than renamed aside: every object and modifier
+    # socket already pointing at this datablock then picks up the new look,
+    # where a ".old" rename would leave existing scenes on the previous
+    # build. Hand edits to the node tree are lost on a version bump.
+    if mat is None:
+        mat = bpy.data.materials.new(MAT_SYNTH)
     mat.use_nodes = True
     nt = mat.node_tree
+    if nt.animation_data is not None:
+        nt.animation_data_clear()      # drop the previous build's driver
     nt.nodes.clear()
     n, lk = nt.nodes.new, nt.links.new
 
-    out = n("ShaderNodeOutputMaterial"); out.location = (700, 0)
-    pr = n("ShaderNodeBsdfPrincipled"); pr.location = (350, 0)
+    def mixf(x, y, a, b, fac, label=""):
+        """Float mix, accepting sockets or constants for A and B."""
+        m = n("ShaderNodeMix"); m.location = (x, y); m.data_type = 'FLOAT'
+        if label:
+            m.label = label
+        f, sa, sb, res = _mix_io(m)
+        for sock, val in ((sa, a), (sb, b)):
+            if isinstance(val, bpy.types.NodeSocket):
+                lk(val, sock)
+            else:
+                sock.default_value = val
+        lk(fac, f)
+        return res
 
-    # powder bloom: 0 head-on, 1 at grazing angles
-    lw = n("ShaderNodeLayerWeight"); lw.location = (-700, 250)
+    out = n("ShaderNodeOutputMaterial"); out.location = (900, 0)
+    pr = n("ShaderNodeBsdfPrincipled"); pr.location = (550, 0)
+
+    # ---- time in air ------------------------------------------------------
+    now = n("ShaderNodeValue"); now.location = (-1500, 400)
+    now.name = "Arachne Frame"; now.label = "current frame"
+    try:
+        fcu = nt.driver_add('nodes["Arachne Frame"].outputs[0].default_value')
+        # driver_add seeds a generator modifier that would ignore the
+        # expression entirely
+        for mod in list(fcu.modifiers):
+            fcu.modifiers.remove(mod)
+        fcu.driver.type = 'SCRIPTED'
+        fcu.driver.expression = "frame"
+    except Exception:
+        # no driver: the whole web reads as fully cured, which is the
+        # sensible fallback rather than a broken material
+        now.outputs[0].default_value = 1e6
+
+    shot = n("ShaderNodeAttribute"); shot.location = (-1500, 200)
+    shot.attribute_name = A_SHOT
+    shot.attribute_type = 'GEOMETRY'
+
+    age = n("ShaderNodeMath"); age.location = (-1250, 300)
+    age.operation = 'SUBTRACT'; age.label = "frames in air"
+    lk(now.outputs[0], age.inputs[0])
+    lk(shot.outputs["Fac"], age.inputs[1])
+
+    cure = n("ShaderNodeValue"); cure.location = (-1250, 100)
+    cure.name = "Cure Frames"; cure.label = "cure frames"
+    cure.outputs[0].default_value = 36.0
+
+    setf = n("ShaderNodeMapRange"); setf.location = (-1050, 250)
+    setf.label = "0 = just fired, 1 = set"
+    setf.inputs["From Min"].default_value = 0.0
+    lk(cure.outputs[0], setf.inputs["From Max"])
+    lk(age.outputs["Value"], setf.inputs["Value"])
+    dry = setf.outputs["Result"]
+
+    # ---- powder: only once set, and only at grazing angles ----------------
+    lw = n("ShaderNodeLayerWeight"); lw.location = (-1050, 600)
     lw.inputs["Blend"].default_value = 0.35
-    powder = lw.outputs["Facing"]
+    powder = n("ShaderNodeMath"); powder.location = (-800, 600)
+    powder.operation = 'MULTIPLY'; powder.label = "ester bloom"
+    lk(lw.outputs["Facing"], powder.inputs[0])
+    lk(dry, powder.inputs[1])
 
-    col = n("ShaderNodeMix"); col.location = (-350, 250)
+    col = n("ShaderNodeMix"); col.location = (-350, 550)
     col.data_type = 'RGBA'
     cfac, ca, cb, cres = _mix_io(col)
-    ca.default_value = (0.855, 0.885, 0.945, 1.0)   # cured polymer core
-    cb.default_value = (0.970, 0.965, 0.945, 1.0)   # ester powder bloom
-    lk(powder, cfac)
+    ca.default_value = (0.855, 0.885, 0.945, 1.0)   # knitted polymer
+    cb.default_value = (0.970, 0.965, 0.945, 1.0)   # ester powder
+    lk(powder.outputs["Value"], cfac)
     lk(cres, pr.inputs["Base Color"])
 
-    # roughness: smooth extruded polymer, dulled where it has powdered over
-    rnoise = n("ShaderNodeTexNoise"); rnoise.location = (-900, -50)
+    # ---- roughness: wet and glossy -> set and matte -> powdered -----------
+    rnoise = n("ShaderNodeTexNoise"); rnoise.location = (-1050, -100)
     rnoise.inputs["Scale"].default_value = 260.0
-    rmap = n("ShaderNodeMapRange"); rmap.location = (-700, -50)
-    rmap.inputs["To Min"].default_value = 0.10
-    rmap.inputs["To Max"].default_value = 0.24
+    rmap = n("ShaderNodeMapRange"); rmap.location = (-800, -100)
+    rmap.inputs["To Min"].default_value = 0.14
+    rmap.inputs["To Max"].default_value = 0.30
     lk(rnoise.outputs["Fac"], rmap.inputs["Value"])
-    rmix = n("ShaderNodeMix"); rmix.location = (-350, -50)
-    rmix.data_type = 'FLOAT'
-    rfac, ra, rb, rres = _mix_io(rmix)
-    rb.default_value = 0.55
-    lk(powder, rfac)
-    lk(rmap.outputs["Result"], ra)
-    lk(rres, pr.inputs["Roughness"])
+    # tacky fibre is still wet, so it starts far glossier than it ends
+    set_rough = mixf(-500, -100, 0.05, rmap.outputs["Result"], dry,
+                     label="wet -> set")
+    lk(mixf(-200, -100, set_rough, 0.62, powder.outputs["Value"],
+            label="powdered"), pr.inputs["Roughness"])
 
-    # micro-texture of the knitted filament bundle
-    bnoise = n("ShaderNodeTexNoise"); bnoise.location = (-900, -400)
+    # ---- adhesion fading with exposure ------------------------------------
+    # a tacky thread carries a wet skin and passes more light; a set one is
+    # a dry opaque fibre
+    coat = mixf(-500, 250, 0.85, 0.30, dry, label="wet skin")
+    trans = mixf(-500, 100, 0.32, 0.08, dry, label="clouding over")
+    sheen = mixf(-500, -300, 0.10, 0.35, dry, label="dry fuzz")
+
+    # ---- micro-texture of the knitted filament bundle ---------------------
+    bnoise = n("ShaderNodeTexNoise"); bnoise.location = (-1050, -500)
     bnoise.inputs["Scale"].default_value = 620.0
     bnoise.inputs["Detail"].default_value = 8.0
-    bump = n("ShaderNodeBump"); bump.location = (-350, -400)
+    bump = n("ShaderNodeBump"); bump.location = (-500, -500)
     bump.inputs["Strength"].default_value = 0.05
     lk(bnoise.outputs["Fac"], bump.inputs["Height"])
     lk(bump.outputs["Normal"], pr.inputs["Normal"])
 
-    _set_input(pr, 1.53, "IOR")                       # nylon
-    _set_input(pr, 0.18, "Transmission Weight", "Transmission")
+    _set_input(pr, 1.53, "IOR")                       # nylon-related
     _set_input(pr, 0.15, "Subsurface Weight", "Subsurface")
     _set_input(pr, (0.004, 0.004, 0.006), "Subsurface Radius")
-    _set_input(pr, 0.45, "Coat Weight", "Clearcoat")  # air-cured skin
     _set_input(pr, 0.05, "Coat Roughness", "Clearcoat Roughness")
     _set_input(pr, 1.60, "Coat IOR")
-    _set_input(pr, 0.25, "Sheen Weight", "Sheen")
     _set_input(pr, 0.30, "Sheen Roughness")
     _set_input(pr, 0.60, "Specular IOR Level", "Specular")
+    for value, names in ((coat, ("Coat Weight", "Clearcoat")),
+                         (trans, ("Transmission Weight", "Transmission")),
+                         (sheen, ("Sheen Weight", "Sheen"))):
+        sock = _first_input(pr, *names)
+        if sock is not None:
+            lk(value, sock)
 
     lk(pr.outputs["BSDF"], out.inputs["Surface"])
+    mat["swf_version"] = SYNTH_VERSION
     return mat

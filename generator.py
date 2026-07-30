@@ -38,20 +38,30 @@ from .constants import A_PIN, A_SHOT, A_NOTEAR, A_EMIT, P_EMITTER
 _LIVE_PENDING = False
 
 
-def _live_ready(p):
+def live_ready(p):
     """Whether a live rebuild may run right now.
 
     A running GPU sim owns the mesh it was built from: regenerating swaps
     in fresh data, `invalidate_state` drops the solver state and the sim
-    restarts from scratch. Live Update is for shaping the web *before* the
-    solver goes on, so once it is enabled the rebuild is skipped rather
-    than nuking the simulation. Dragging the emitter, the aim target or a
-    collider is a depsgraph tick per mouse move, so without this the web
-    restarts continuously while you drag."""
+    restarts from scratch. Dragging the emitter, the aim target or a
+    collider is a depsgraph tick per mouse move, so left ungated the web
+    restarts continuously while you drag.
+
+    The escape hatch is the Arachne GPU Apply modifier's viewport toggle.
+    That modifier is what puts simulated positions on screen; with it off
+    you are looking at the built mesh, so a rebuild is both safe and
+    visible and there is no reason to refuse one. Switching it off beats
+    tearing the solver down and losing its settings, and switching it back
+    on resumes the sim on the next frame."""
     if p is None or not p.live or p.live_obj is None:
         return False
-    g = getattr(p.live_obj, "swf_gpu", None)
-    return g is None or not g.enabled
+    obj = p.live_obj
+    g = getattr(obj, "swf_gpu", None)
+    if g is None or not g.enabled:
+        return True
+    from .gpu_solver import apply_modifier
+    mod = apply_modifier(obj)
+    return mod is None or not mod.show_viewport
 
 
 def _live_update(self, context):
@@ -60,7 +70,7 @@ def _live_update(self, context):
     global _LIVE_PENDING
     if _LIVE_PENDING:
         return
-    if not _live_ready(getattr(context.scene, "swf_web", None)):
+    if not live_ready(getattr(context.scene, "swf_web", None)):
         return
     _LIVE_PENDING = True
     bpy.app.timers.register(_live_timer, first_interval=0.0)
@@ -75,7 +85,7 @@ def schedule_live_update():
     global _LIVE_PENDING
     if _LIVE_PENDING:
         return True
-    if not _live_ready(getattr(bpy.context.scene, "swf_web", None)):
+    if not live_ready(getattr(bpy.context.scene, "swf_web", None)):
         return False
     _LIVE_PENDING = True
     bpy.app.timers.register(_live_timer, first_interval=0.0)
@@ -91,7 +101,7 @@ def _live_timer():
     p = getattr(context.scene, "swf_web", None)
     # re-checked here: the solver can be switched on between the schedule
     # and this firing
-    if not _live_ready(p):
+    if not live_ready(p):
         return None
     try:
         regenerate_live(context, p)
@@ -162,6 +172,19 @@ class ARN_WebProps(PropertyGroup):
         description="Fire toward this object. Unset = the emitter's local "
                     "-Z axis; with no emitter either, shots spray in all "
                     "directions", update=_live_update)
+    shot_aim_collection: PointerProperty(
+        name="Aim Collection", type=bpy.types.Collection,
+        description="Fire at every object in this collection, one per burst "
+                    "in turn (overrides the single Aim Target). With Bursts "
+                    "3 and two objects in here the volleys go first, second, "
+                    "first — so a burst still leaves one clean cord at one "
+                    "thing. Members no burst reaches are ignored completely, "
+                    "so more targets than Bursts just wastes the extras: "
+                    "raise Bursts to use them. Each volley can only stick to "
+                    "its own target and whatever mesh you had selected — "
+                    "targets do not block each other, so clustered ones stay "
+                    "separate webs instead of trading cords",
+        update=_live_update)
     shot_stick_emitter: BoolProperty(
         name="Stick To Emitter", default=True,
         description="The muzzle end stays attached to the emitter and is "
@@ -183,7 +206,7 @@ class ARN_WebProps(PropertyGroup):
         description="Frames between the start of one burst and the next",
         update=_live_update)
     shot_start: IntProperty(
-        name="First Shot Frame", default=1, min=0,
+        name="First Shot Frame", default=15, min=0,
         description="Frame the first strand leaves the emitter",
         update=_live_update)
     shot_interval: FloatProperty(
@@ -269,9 +292,13 @@ class ARN_WebProps(PropertyGroup):
         description="Chords knitted between neighbouring splat strands, "
                     "the webbing that fills the splat in", update=_live_update)
     shot_tangle: IntProperty(
-        name="Cross Threads", default=200, min=0, max=200,
+        name="Cross Threads", default=200, min=0, max=4000, soft_max=400,
         description="Extra strands strung between shots already fired, "
-                    "webbing the burst together", update=_live_update)
+                    "webbing the burst together. Each one costs Detail "
+                    "vertices before Strandify, then Profile Resolution "
+                    "again on top — the densest single thing in the web, so "
+                    "the slider stops at 400 and higher values are typed",
+        update=_live_update)
 
     radials: IntProperty(
         name="Radials", default=16, min=3, max=64,
@@ -310,7 +337,10 @@ class ARN_WebProps(PropertyGroup):
     detail: IntProperty(
         name="Detail", default=2, min=1, max=5,
         description="Sub-points per thread span (sag resolution for the "
-                    "solver and the scallops)", update=_live_update)
+                    "solver and the scallops). On a Web Shot it sizes the "
+                    "opened fan only — the travelling clot is a braid, so "
+                    "its resolution comes from Clot Twist instead",
+        update=_live_update)
     anchors: IntProperty(
         name="Anchor Threads", default=5, min=1, max=16,
         description="Number of anchor threads extended past the rim",
@@ -331,10 +361,11 @@ class ARN_WebProps(PropertyGroup):
     live: BoolProperty(
         name="Live Update", default=True,
         description="Rebuild the last generated web instantly as you tweak "
-                    "the parameters above. Shaping happens before the "
-                    "solver goes on — regenerating changes the topology, so "
-                    "this is ignored once the GPU solver is enabled on the "
-                    "tracked web rather than restarting its simulation",
+                    "the parameters above. Regenerating changes the "
+                    "topology, so this stands down while the solver is "
+                    "showing rather than restarting its simulation — switch "
+                    "the Arachne GPU Apply modifier's viewport display off "
+                    "to tweak live and keep the solver's settings",
         update=_live_update)
     live_obj: PointerProperty(
         type=bpy.types.Object,
@@ -980,28 +1011,65 @@ def _build_shot(context, p, env_objs):
     scene = context.scene
     fps = scene.render.fps / max(scene.render.fps_base, 1e-6)
     speed = max(p.shot_speed, 1e-3)
-    emit, aim = p.shot_emitter, p.shot_aim
+    emit = p.shot_emitter
     cursor = np.asarray(scene.cursor.location, dtype=np.float64)
 
-    # What the shots can hit. The Aim Target joins the selection whether or
-    # not it was selected — a shot fired at something has to stop on it
-    # rather than pass through — and the emitter is taken out, since silk
-    # leaving a hand should not immediately stick to that hand.
-    env_objs = [o for o in env_objs
-                if o.type == 'MESH' and not o.get("swf_web")]
-    if (aim is not None and aim.type == 'MESH' and aim not in env_objs
-            and not aim.get("swf_web")):
-        env_objs.append(aim)
-    env_objs = [o for o in env_objs if o is not emit]
-    env = _env_data(context, env_objs) if env_objs else None
-    bvh = env[0] if env is not None else None
+    # An Aim Collection fires at each of its members in turn, one per burst;
+    # the single Aim Target is the one-element case. Same override idiom as
+    # collider / collider_collection.
+    if p.shot_aim_collection is not None:
+        aim_pool = [o for o in p.shot_aim_collection.objects
+                    if o is not emit and not o.get("swf_web")]
+    else:
+        aim_pool = [p.shot_aim] if p.shot_aim is not None else []
+    aim_pool = [o for o in aim_pool if o is not None]
 
-    # a mesh Aim Target is shot at all over, not just at its origin
-    aim_surf = None
-    aim_now = np.zeros(3)
-    if aim is not None and aim.type == 'MESH':
-        aim_surf = _env_data(context, [aim])
-        aim_now = np.asarray(aim.matrix_world.translation, dtype=np.float64)
+    # Which pool members some burst actually fires at. Three in the
+    # collection with Bursts 1 uses only the first, and the other two must
+    # then stay out of everything below — as hit-test geometry they would
+    # catch shots the spread threw wide and deflect silk off their surfaces,
+    # hanging threads on objects this web was never pointed at.
+    n_bursts = max(p.shot_bursts, 1)
+    used = ({b % len(aim_pool) for b in range(n_bursts)} if aim_pool
+            else set())
+
+    # Scene geometry that is not an aim target. Selected explicitly, so it
+    # stays hittable for every burst. The emitter is taken out — silk leaving
+    # a hand should not immediately stick to that hand.
+    env_base = [o for o in env_objs
+                if o.type == 'MESH' and not o.get("swf_web")
+                and o is not emit and o not in aim_pool]
+    env = _env_data(context, env_base) if env_base else None
+    bvh = env[0] if env is not None else None       # reassigned per burst
+
+    # Per used target: its surface (a mesh target is shot at all over, not
+    # just at its origin) and the hit test for a burst aimed at it — the
+    # shared environment plus that one target.
+    #
+    # The rest of the pool is deliberately absent. Reach runs to 1.15x the
+    # sampled distance, so a sibling target sitting slightly nearer along the
+    # same line caught shots meant for the far one, and with the targets
+    # clustered that strung cords between objects each burst was supposed to
+    # hit on its own. Each volley now reaches only what it was aimed at.
+    #
+    # Both are built once per target, never per burst — _env_data builds a
+    # BVH — and skipped entirely for members no burst reaches.
+    aim_data = []
+    for i, a in enumerate(aim_pool):
+        if i not in used:
+            aim_data.append((a, None, np.zeros(3), None))
+            continue
+        is_mesh = a.type == 'MESH'
+        surf = _env_data(context, [a]) if is_mesh else None
+        if is_mesh and not env_base:
+            hit = surf                  # nothing to merge in; reuse the BVH
+        else:
+            objs = env_base + ([a] if is_mesh else [])
+            hit = _env_data(context, objs) if objs else None
+        aim_data.append(
+            (a, surf, np.asarray(a.matrix_world.translation,
+                                 dtype=np.float64),
+             hit[0] if hit is not None else None))
 
     # only the emitter's location is sampled per shot — its orientation is
     # read once, so an animated aim needs an Aim Target rather than a
@@ -1111,10 +1179,61 @@ def _build_shot(context, p, env_objs):
             j = rnd.randrange(len(mids))
             segs.append([mids[j], mids[(j + 1) % len(mids)]])
 
-    nseg = max(6, p.detail * 6)
+    def shot_samples(clot):
+        """Where to put points along a shot, 0 = muzzle, 1 = impact.
+        Returns (ts, clot_s), clot_s being the last index still fully
+        balled up.
+
+        Split rather than evenly spaced, because the two halves of a shot
+        need resolution for different reasons. The travelling clot is a
+        helix: it wants about eight points per turn of Clot Twist or the
+        braid reads as a zigzag. The opened fan wants points for sag and
+        curvature, which is what Detail is for. One uniform spacing served
+        whichever half happened to be longer — at Clot 0.8 it put 24 of 31
+        points inside the rope and left 6 for the part that fans out.
+
+        Counts are per unit of flight, NOT per region. Handing the fan a
+        flat `detail * 6` crammed a whole strand's worth of points into
+        whatever short stretch was left past the clot: at Clot 0.8 the fan
+        got 30 points across 20% of the flight, so its segments came out
+        five times shorter than the rope's. Tearing measures strain against
+        rest length and rest length is the segment, so five-times-shorter
+        segments tear on a fifth of the movement — and with Stickiness high
+        each of those extra points is another latched pin that cannot give.
+        Density is span-proportional now, so a fan segment comes out at
+        1/(Detail*6) of the flight whatever the Clot fraction is — the exact
+        length the old uniform spacing gave, and therefore the exact tear
+        behaviour. FAN_BOOST above 1.0 subdivides the fan finer than that
+        and makes it correspondingly easier to tear; it is left at 1.0 for
+        that reason. Detail is still a fan-only dial, which was the point:
+        the rope takes its density from Clot Twist and no longer competes
+        for the budget.
+
+        Capped, because 12 turns at 36 shots is a lot of vertices to spend
+        on a rope the camera sees for a few frames."""
+        FAN_BOOST = 1.0
+        density = max(p.detail, 1) * 6          # points per unit of flight
+        if clot <= 1e-6:
+            opened_n = max(4, int(round(density)))
+            return [s / opened_n for s in range(opened_n + 1)], 0
+        opened_n = max(4, int(round((1.0 - clot) * density * FAN_BOOST)))
+        braid_n = max(6, min(72, int(round(max(clot * density,
+                                              p.shot_clot_twist * 8)))))
+        ts = [clot * s / braid_n for s in range(braid_n)]
+        # ts[braid_n] lands exactly on clot, where opened() is still 0
+        ts += [clot + (1.0 - clot) * s / opened_n
+               for s in range(opened_n + 1)]
+        return ts, braid_n
+
     # clamped: a .blend saved before Spread's bounds were corrected to
     # radians can still hold a huge value
     half = min(max(p.shot_spread, 0.0), math.pi) * 0.5
+
+    # Edges the solver must never tear, accumulated across every burst.
+    # Declared out here on purpose: per-burst it only ever kept the last
+    # volley's, so with Bursts > 1 the earlier clots went unflagged and
+    # burst apart on their own.
+    binders = []
 
     # The emitter fires Bursts volleys of Shots each, Burst Gap frames
     # apart. Every volley is built on its own: its own clot, its own
@@ -1124,6 +1243,20 @@ def _build_shot(context, p, env_objs):
     for burst in range(max(p.shot_bursts, 1)):
         b_start = float(p.shot_start) + burst * p.shot_burst_gap
         strands = []            # (vertex indices, arrival frames, angle)
+
+        # This volley's target, cycling through the pool. One target per
+        # burst on purpose: the clot below averages the volley into a single
+        # rope, which only reads right when its shots agree on a direction.
+        #
+        # `bvh` is rebound here, not just read: outside() closes over it, so
+        # lifting silk out of surfaces follows the same per-burst hit test
+        # and stops shoving this volley's threads off a sibling target.
+        if aim_data:
+            aim, aim_surf, aim_now, aim_bvh = aim_data[burst % len(aim_data)]
+            bvh = aim_bvh if aim_bvh is not None else (
+                env[0] if env is not None else None)
+        else:
+            aim, aim_surf, aim_now = None, None, np.zeros(3)
 
         # ---- pass 1: where every shot starts, aims and lands ---------
         fired = []
@@ -1207,18 +1340,28 @@ def _build_shot(context, p, env_objs):
         # the clot has volume: each strand sits at its own spot inside the mass
         clot_r = p.shot_clot_size
         e1_c, e2_c = up_c, np.cross(ax_c, up_c)
-        # the rope meanders as a unit — shared by every strand, so the bundle
-        # snakes instead of running dead straight like a cable
-        mean_amp = L_c * (0.015 + 0.03 * p.shot_whip)
-        waves_c = [[(rnd.uniform(0.5, 2.2), rnd.uniform(0.0, 2.0 * math.pi),
-                     rnd.uniform(-1.0, 1.0)) for _ in range(2)]
+        # The rope meanders as a unit — shared by every strand, so the bundle
+        # snakes instead of running dead straight like a cable.
+        #
+        # Two low-frequency waves only ever produced one broad bow across
+        # the whole cord, and at 1.5% of the flight that reads as a straight
+        # line however long the clot runs. Three components over a wider
+        # band put two or three visible kinks in it instead, and the base
+        # amplitude is doubled so they are actually legible at range. Whip
+        # still stacks on top; this is what the cord does at Whip 0, which
+        # is where the dial sits whenever someone wants the landed strands
+        # left alone.
+        mean_amp = L_c * (0.03 + 0.03 * p.shot_whip)
+        waves_c = [[(rnd.uniform(0.8, 5.0), rnd.uniform(0.0, 2.0 * math.pi),
+                     rnd.uniform(-1.0, 1.0)) for _ in range(3)]
                    for _axis in range(2)]
         twist = p.shot_clot_twist * 2.0 * math.pi
         # clot_s = last segment still fully balled up (opened() is 0 there).
         # Lashing stops at it: one segment further the strands have already
         # begun to separate, and a binder thread there would span metres and
         # haul the opening fan back together.
-        clot_s = max(0, min(nseg - 1, int(clot * nseg)))
+        ts_all, clot_s = shot_samples(clot)
+        nseg = len(ts_all) - 1
         open_s = min(nseg - 1, clot_s + 1)
 
         def opened(t):
@@ -1280,7 +1423,7 @@ def _build_shot(context, p, env_objs):
 
             idx, arrive = [], []
             for s in range(nseg + 1):
-                t = s / nseg
+                t = ts_all[s]
                 # t**1.8 skews the lob's peak to ~0.68 of the way out: shallow
                 # off the muzzle, steep climb, then the drop onto the hit
                 lob = math.sin(math.pi * t ** 1.8)
@@ -1328,6 +1471,16 @@ def _build_shot(context, p, env_objs):
                 arrive.append(at)
                 if s:
                     segs.append([idx[-2], idx[-1]])
+                    if s <= clot_s:
+                        # Inside the travelling clot. The braid needs eight
+                        # points per turn of Clot Twist, which makes these
+                        # segments several times shorter than the fan's, and
+                        # tearing measures strain against the segment — so
+                        # any jostle snapped the rope along its own length.
+                        # A cord of fluid should not be coming apart there
+                        # anyway; it opens into strands, it does not fray.
+                        # Same reasoning as the binder threads below.
+                        binders.append((idx[-2], idx[-1]))
             # angle around the burst axis, so "neighbouring" strands are known
             # and ring threads can be strung between them
             e2 = np.cross(ax_c, up_c)
@@ -1391,7 +1544,6 @@ def _build_shot(context, p, env_objs):
         # segment (plus a few chords across the bundle) hold the mass
         # together as one rope, and since silk only pulls they never push
         # the strands apart.
-        binders = []          # edges the solver must not tear
         if len(strands) > 1 and clot_s > 1:
             ring = sorted(range(len(strands)), key=lambda k: strands[k][2])
 
@@ -1406,7 +1558,7 @@ def _build_shot(context, p, env_objs):
                 rad_k = rnd.uniform(1.02, 1.3)
                 prev = None
                 for s in range(0, clot_s + 1):
-                    t = s / nseg
+                    t = ts_all[s]
                     aa = ph + turns * 2.0 * math.pi * (t / max(clot, 1e-6))
                     lob = math.sin(math.pi * t ** 1.8)
                     co = rope(t, lob) + (
@@ -1499,7 +1651,17 @@ def _build_shot(context, p, env_objs):
                         d[owner == owner[src]] = np.inf
                         if not np.isfinite(d).any():
                             continue
-                        near = np.argsort(d)[:3]
+                        # partition, not a full sort: only the three nearest
+                        # matter, and this runs once per cross thread —
+                        # sorting the whole pool put an n log n inside the
+                        # loop for nothing
+                        if d.size > 3:
+                            near = np.argpartition(d, 3)[:3]
+                        else:
+                            near = np.argsort(d)[:3]
+                        near = near[np.isfinite(d[near])]
+                        if near.size == 0:
+                            continue
                         dst = int(rnd.choice(near))
                         link(pool_v[src], pool_v[dst], rnd.uniform(0.0, 1.5))
                         # a third of them carry on to yet another strand, which
@@ -1553,9 +1715,11 @@ def _build_shot(context, p, env_objs):
             "value", marr)
         me[P_EMITTER] = emit.name
 
-    # The threads binding the clot's fibres together are only millimetres
-    # long, so any jostle passes the tear threshold in relative terms and
-    # the cord bursts apart. Flag them unbreakable.
+    # Everything inside the travelling clot: the binder threads, which are
+    # only millimetres long, and the strand segments themselves, which the
+    # braid's point density makes short. Either way a jostle passes the tear
+    # threshold in relative terms and the cord bursts apart. Flag the lot
+    # unbreakable — the clot opens into strands, it does not fray.
     if binders:
         want = {frozenset((mesh_idx[a], mesh_idx[b])) for a, b in binders}
         flags = np.zeros(len(me.edges), dtype=np.bool_)

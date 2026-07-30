@@ -10,7 +10,8 @@
 #                 tension heatmap material
 #
 #  QUICK START: (optionally select a collider mesh) -> N-panel > Arachne
-#  > "Create Web + Sim + Strands" -> play from frame 1.
+#  > "Generate Web" -> "Add GPU Solver" -> "Add Strandify" -> play from
+#  frame 1.
 #
 #  Blender 4.2+ / 5.x.
 # ============================================================================
@@ -21,7 +22,7 @@
 bl_info = {
     "name": "Arachne",
     "author": "Amsy",
-    "version": (3, 5, 2),
+    "version": (4, 0, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar (N) > Arachne",
     "description": "Procedural webs with a native-GPU tearing solver, "

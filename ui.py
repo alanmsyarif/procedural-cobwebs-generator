@@ -1,4 +1,4 @@
-# N-panel UI and the one-click full setup (lite: generator + GPU solver).
+# N-panel UI.
 
 import os
 
@@ -6,11 +6,26 @@ import bpy
 from bpy.types import Operator, Panel
 
 from .constants import A_EMIT, A_SHOT, BUILD, P_EMITTER
-from .generator import build_web_object
-from .gpu_solver import enable_gpu_solver, gpu_backend_available
-from .strandify import apply_strandify
+from .generator import live_ready
+from .gpu_solver import backend_reason, gpu_backend_available
 
 _DISK = {"mtime": None, "build": BUILD}
+
+
+def _wrap(text, width):
+    """Break a message into panel-width lines. Blender clips a label at the
+    region edge rather than wrapping it, so a raw exception string would
+    lose its tail — which is the half that says what went wrong."""
+    lines, line = [], ""
+    for word in text.split():
+        if line and len(line) + len(word) + 1 > width:
+            lines.append(line)
+            line = word
+        else:
+            line = (line + " " + word).strip()
+    if line:
+        lines.append(line)
+    return lines or [""]
 
 
 def disk_build():
@@ -124,45 +139,6 @@ class ARN_OT_diagnose(Operator):
         return {'FINISHED'}
 
 
-class ARN_OT_full_setup(Operator):
-    """Generate a web with the GPU solver and strandify already applied.
-    If a mesh is selected when you click, it becomes the collider
-    (and, in Chaotic Cobweb mode, the anchor geometry)"""
-    bl_idname = "arachne.full_setup"
-    bl_label = "Create Web + Sim + Strands"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        env = [o for o in context.selected_objects if o.type == 'MESH']
-        # Web Shot strands already stick where they hit, and the surface
-        # they were fired at makes a terrible bounding-sphere collider —
-        # its sphere swallows the whole web and blows it apart. Leave the
-        # collider unset and let the user pick a moving one.
-        collider = None if context.scene.swf_web.mode == 'SHOT' else (
-            env[0] if env else None)
-        obj = build_web_object(context, context.scene.swf_web, env)
-        if obj is None:
-            self.report({'ERROR'},
-                        "Nothing to build — Chaotic Cobweb needs selected "
-                        "mesh geometry to anchor to, Web Shot needs at "
-                        "least one valid shot.")
-            return {'CANCELLED'}
-        # Live Update keeps tracking this web: rebuilding it now drops the
-        # simulation bound to the old mesh and rebinds on the next frame
-        # (see gpu_solver.invalidate_state), so tweaking a slider after the
-        # full setup actually shows up instead of being simulated away
-        context.scene.swf_web.live_obj = obj
-        if gpu_backend_available():
-            enable_gpu_solver(context, obj, collider)
-        else:
-            self.report({'WARNING'},
-                        "GPU compute unavailable — web created without "
-                        "simulation.")
-        apply_strandify(obj)
-        self.report({'INFO'}, "Web ready — play from frame 1.")
-        return {'FINISHED'}
-
-
 def _draw_shot_status(col, context, p):
     """Everything that decides whether a Web Shot sticks to its emitter,
     stated on the panel. Each of these has been the answer at some point,
@@ -241,7 +217,26 @@ class ARN_PT_main(Panel):
             col.label(text="Select anchor geometry first.", icon='INFO')
         elif p.mode == 'SHOT':
             col.prop(p, "shot_emitter")
-            col.prop(p, "shot_aim")
+            aimc = p.shot_aim_collection
+            row = col.row()
+            row.enabled = aimc is None       # the collection overrides it
+            row.prop(p, "shot_aim")
+            col.prop(p, "shot_aim_collection")
+            if aimc is not None:
+                n = len([o for o in aimc.objects
+                         if o is not p.shot_emitter and not o.get("swf_web")])
+                if n == 0:
+                    col.label(text="Aim Collection is empty.", icon='ERROR')
+                elif n > p.shot_bursts:
+                    # unreached members are ignored entirely, hit test
+                    # included — say so rather than letting it look broken
+                    col.label(text="%d targets, Bursts %d — only the first"
+                                   % (n, p.shot_bursts), icon='ERROR')
+                    col.label(text="%d used, rest ignored."
+                                   % p.shot_bursts, icon='BLANK1')
+                else:
+                    col.label(text="%d targets, one per burst in turn." % n,
+                              icon='INFO')
             row = col.row()
             row.enabled = p.shot_emitter is not None
             row.prop(p, "shot_stick_emitter")
@@ -254,10 +249,10 @@ class ARN_PT_main(Panel):
             col.prop(p, "shot_start")
             col.prop(p, "shot_interval")
             col.prop(p, "shot_speed")
-            # an Aim Target sets the reach itself, far enough to arrive and
+            # an aim target sets the reach itself, far enough to arrive and
             # no farther, so Range has nothing to say
             row = col.row()
-            row.enabled = p.shot_aim is None
+            row.enabled = p.shot_aim is None and aimc is None
             row.prop(p, "shot_range")
             col.prop(p, "shot_spread")
             col.separator()
@@ -311,26 +306,34 @@ class ARN_PT_main(Panel):
         row = col.row(align=True)
         row.prop(p, "live", toggle=True, icon='MOD_TIME')
         if p.live:
-            lg = getattr(p.live_obj, "swf_gpu", None)
             if p.live_obj is None:
                 col.label(text="Generate a web to tweak it live.",
                           icon='INFO')
-            elif lg is not None and lg.enabled:
-                # rebuilding would swap the mesh out from under the running
-                # sim, so live update stands down — say so instead of
-                # looking broken
-                row.label(text="", icon='LOCKED')
-                col.label(text="Solver running — remove it to tweak live.",
-                          icon='INFO')
-            else:
+            elif live_ready(p):
                 row.label(text="", icon='CHECKMARK')
-        col.operator("arachne.full_setup", icon='PLAY')
+            else:
+                # rebuilding would swap the mesh out from under the running
+                # sim, so live update stands down. Point at the way back in
+                # rather than just saying no: hiding the apply modifier in
+                # the viewport keeps every solver setting intact.
+                row.label(text="", icon='LOCKED')
+                col.label(text="Solver on. Hide the GPU Apply modifier",
+                          icon='INFO')
+                col.label(text="in the viewport to tweak live.",
+                          icon='BLANK1')
 
         box = layout.box()
         box.label(text="GPU Solver", icon='MEMORY')
         col = box.column(align=True)
         if not gpu_backend_available():
-            col.label(text="GPU compute unavailable.", icon='ERROR')
+            # say which of the two it is, wrapped — an exception text is
+            # longer than one panel row
+            warn = col.box()
+            warn.scale_y = 0.7
+            for i, line in enumerate(_wrap(backend_reason(), 38)):
+                warn.label(text=line, icon='ERROR' if i == 0 else 'BLANK1')
+            col.operator("arachne.reset_gpu", text="Clear Error",
+                         icon='FILE_REFRESH')
         col.operator("arachne.add_gpu_solver", icon='PLAY')
         obj = context.object
         if obj and obj.type == 'MESH' and obj.swf_gpu.enabled:
@@ -355,6 +358,18 @@ class ARN_PT_main(Panel):
             if g.collision_shape == 'MESH_SDF' or g.collider_collection:
                 col.prop(g, "sdf_resolution")
             col.prop(g, "collider")
+            # A bounding sphere around a box reaches sqrt(3)/2 of the side
+            # from its centre while the faces sit at half the side, so the
+            # collision surface bulges well past anything the web is stuck
+            # to and shoves those anchors off it. Harmless for a roughly
+            # round collider, fatal for the flat thing a shot just hit.
+            if (g.collider is not None and g.collision_shape == 'SPHERE'
+                    and not g.collider_collection):
+                warn = col.box()
+                warn.scale_y = 0.7
+                warn.label(text="Bounding sphere reaches past flat faces",
+                           icon='ERROR')
+                warn.label(text="Shot at this? Use Mesh (SDF) or clear it.")
             col.prop(g, "collider_collection")
             col.prop(g, "collision_offset")
             col.prop(g, "friction")
@@ -392,6 +407,25 @@ class ARN_PT_main(Panel):
             col.separator()
             col.prop(g, "enable_tearing")
             col.prop(g, "tear_threshold")
+            if g.enable_tearing:
+                # Tearing measures stretch against rest length, and Tension
+                # above 1 shrinks rest — so a thread starts out already
+                # part-way to the threshold and the number here buys less
+                # than it reads. Spell out what is actually left.
+                from .gpu_native import rest_slack
+                slack = rest_slack(g.tension)
+                start = 1.0 / max(slack, 1e-6)
+                if start > 1.0:
+                    margin = g.tear_threshold / start
+                    warn = col.box()
+                    warn.scale_y = 0.7
+                    warn.label(
+                        text="Pre-tension starts threads at %.2f stretch"
+                             % start,
+                        icon='INFO' if margin > 1.5 else 'ERROR')
+                    warn.label(text="Tears at %.2fx built, not %.2fx"
+                                    % (g.tear_threshold * slack,
+                                       g.tear_threshold))
             col.separator()
             row = col.row(align=True)
             row.operator("arachne.reset_gpu", icon='FILE_REFRESH')
@@ -421,7 +455,7 @@ class ARN_PT_main(Panel):
         row.operator("arachne.diagnose", text="", icon='CONSOLE')
 
 
-classes = (ARN_OT_full_setup, ARN_OT_diagnose, ARN_PT_main)
+classes = (ARN_OT_diagnose, ARN_PT_main)
 
 
 def _safe_register(cls):

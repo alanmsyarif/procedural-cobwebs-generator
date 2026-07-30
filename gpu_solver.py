@@ -30,6 +30,20 @@ def gpu_backend_available():
     return gpu_native.native_available() and not gpu_native.native_broken()
 
 
+def backend_reason():
+    """Why the solver is unavailable, or "" when it is fine. The two causes
+    need telling apart: a build without compute shaders can never work,
+    while a backend disabled by a caught error is this session only and
+    Reset GPU Sim clears it."""
+    from . import gpu_native
+    if not gpu_native.native_available():
+        return "No compute shaders in this Blender build."
+    if gpu_native.native_broken():
+        msg = gpu_native.broken_reason()
+        return "Solver hit an error: %s" % (msg or "see system console")
+    return ""
+
+
 def _ensure_attr(me, name, dtype, domain):
     a = me.attributes.get(name)
     if a is None or a.data_type != dtype or a.domain != domain:
@@ -279,6 +293,17 @@ def _moved(obj):
     return True
 
 
+def _aim_moved(p):
+    """Has any aim target been dragged? An Aim Collection means the whole
+    pool counts, not just whichever object the single-target slot holds —
+    every member decides where one of the bursts lands. Not short-circuited:
+    _moved records what it saw, so skipping the rest would leave them stale
+    and fire a second rebuild on the next tick."""
+    if p.shot_aim_collection is not None:
+        return any([_moved(o) for o in p.shot_aim_collection.objects])
+    return _moved(p.shot_aim)
+
+
 @persistent
 def _on_depsgraph(scene, depsgraph=None):
     global _IN_DEPSGRAPH
@@ -294,7 +319,7 @@ def _on_depsgraph(scene, depsgraph=None):
         p = getattr(scene, "swf_web", None)
         if (p is not None and p.mode == 'SHOT' and p.live
                 and p.live_obj is not None
-                and (_moved(p.shot_emitter) | _moved(p.shot_aim))):
+                and (_moved(p.shot_emitter) | _aim_moved(p))):
             from .generator import schedule_live_update
             # declines once the solver owns the mesh — fall through to
             # carrying the anchors instead of restarting the simulation
@@ -379,6 +404,17 @@ def _ensure_apply_group():
     return nt
 
 
+def apply_modifier(obj):
+    """The object's Arachne GPU Apply modifier, or None. Its viewport
+    toggle is what decides whether you are looking at the simulation or at
+    the built mesh underneath it."""
+    for m in getattr(obj, "modifiers", ()):
+        if (m.type == 'NODES' and m.node_group
+                and m.node_group.name.startswith(GROUP_GPU_APPLY)):
+            return m
+    return None
+
+
 def invalidate_state(obj):
     """Throw away the simulation bound to `obj`'s previous mesh.
 
@@ -461,9 +497,10 @@ class ARN_GPUProps(PropertyGroup):
                     "lower = slack that droops into catenaries. Above 1 "
                     "pre-tensions the silk — rest lengths shorter than "
                     "built, so the threads keep pulling and the last of the "
-                    "gravity droop comes out (2 = 15% shorter). Raise Tear "
-                    "Threshold to match: pre-tensioned threads start out "
-                    "closer to snapping")
+                    "gravity droop comes out (2 = 15% shorter). Tearing "
+                    "measures strain against rest, so pre-tensioned threads "
+                    "start out closer to snapping — the panel prints what "
+                    "is left of the Tear Threshold")
     resist_compression: BoolProperty(
         name="Resist Compression", default=False,
         description="Off = silk-like unilateral constraints (threads pull "
@@ -563,8 +600,7 @@ class ARN_OT_add_gpu_solver(Operator):
 
     def execute(self, context):
         if not gpu_backend_available():
-            self.report({'ERROR'},
-                        "Blender GPU compute unavailable in this build.")
+            self.report({'ERROR'}, backend_reason())
             return {'CANCELLED'}
         obj = context.object
         others = [o for o in context.selected_objects

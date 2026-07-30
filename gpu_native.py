@@ -34,6 +34,7 @@
 # frame by _ANCHOR instead.
 
 import random
+import traceback
 
 import numpy as np
 
@@ -45,6 +46,7 @@ from .constants import (A_PIN, A_SHOT, A_NOTEAR, A_GPU_POS, A_BROKEN,
 
 _W = 1024
 _BROKEN_FLAG = False
+_BROKEN_MSG = ""
 
 
 def native_available():
@@ -60,15 +62,26 @@ def native_broken():
     return _BROKEN_FLAG
 
 
+def broken_reason():
+    """Why the backend was disabled, short enough for a panel row. One
+    caught exception disables the solver for the rest of the session, and
+    printing it to the system console was no use to anyone who had not
+    already opened that console — so it is kept here too."""
+    return _BROKEN_MSG
+
+
 def _mark_broken(ex):
-    global _BROKEN_FLAG
+    global _BROKEN_FLAG, _BROKEN_MSG
     _BROKEN_FLAG = True
+    _BROKEN_MSG = "%s: %s" % (type(ex).__name__, ex)
     print("Arachne native GPU backend disabled after error:", ex)
+    traceback.print_exc()
 
 
 def _clear_broken():
-    global _BROKEN_FLAG
+    global _BROKEN_FLAG, _BROKEN_MSG
     _BROKEN_FLAG = False
+    _BROKEN_MSG = ""
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +456,31 @@ def _assign_collider(web_obj, colliders, pos, mask, offset):
     return out
 
 
+def rest_slack(tension):
+    """Rest length as a multiple of built length (Kole tension slack).
+
+    Below 1.0 rest lengths run long, so threads carry slack and droop into
+    catenaries. Past 1.0 it runs the other way — rest SHORTER than built, so
+    the unilateral constraints pull permanently and the residual gravity
+    droop that survives at 1.0 comes out.
+
+    Much gentler slope on that side: the slack rate would contract the web
+    by a quarter and yank the anchors, where 2.0 is 15% pre-tension and
+    already rigid.
+
+    0.15 is deliberate, and was briefly dropped to 0.06 to stop web shots
+    tearing. That was the wrong lever — the fragility was short clot
+    segments, now flagged unbreakable at build time, and softening this
+    only took the tautness out of the dial people reach for. Pre-tension
+    does still cost tear margin, since tearing measures strain against rest
+    and this shrinks rest; the panel reports what is left.
+
+    Shared with that panel, so the two cannot drift apart."""
+    if tension <= 1.0:
+        return 1.0 + (1.0 - tension) * 1.5
+    return 1.0 - (tension - 1.0) * 0.15
+
+
 def _anchor_base(web_obj, emitter, pos, mask, fire):
     """Bake each muzzle anchor's offset from the emitter.
 
@@ -574,17 +612,9 @@ class NativeState:
             a.data.foreach_get("value", tmp)
             pin = tmp.astype(np.float32)
 
-        # tension slack (Kole): rest lengths longer than built lengths.
-        # Past 1.0 it runs the other way — rest SHORTER than built, so the
-        # unilateral constraints pull permanently and the residual gravity
-        # droop that survives at 1.0 comes out. Much gentler slope on that
-        # side: the slack rate would contract the web by a quarter and yank
-        # the anchors, where 2.0 here is 15% pre-tension and already rigid.
-        t = g.tension
-        slack = (1.0 + (1.0 - t) * 1.5 if t <= 1.0
-                 else 1.0 - (t - 1.0) * 0.15)
         rest = (np.linalg.norm(pos[edges[:, 0]] - pos[edges[:, 1]],
-                               axis=1) * slack).astype(np.float32)
+                               axis=1) * rest_slack(g.tension)
+                ).astype(np.float32)
 
         broken = np.zeros(m, np.float32)
         if g.deteriorate > 0.0 and m:
