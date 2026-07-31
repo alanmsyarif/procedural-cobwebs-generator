@@ -1,5 +1,5 @@
 # Strandify: turns the (simulated, possibly torn) edge mesh into renderable
-# silk geometry — curves with noisy radius swept into tubes — plus dew
+# silk geometry, curves with noisy radius swept into tubes — plus dew
 # droplets with their own physics, simulated in a nested Simulation Zone:
 #
 #   * droplets cling to the silk tubes (nearest-surface snap each frame,
@@ -601,7 +601,7 @@ class ARN_OT_bake_dew(Operator):
     """Bake the dew droplet simulation to disk so renders replay it
     exactly (the render depsgraph can't reuse the viewport's live sim).
     Stepping through the frames also fills the web solver's render
-    cache. Save the .blend first — bakes are stored beside it"""
+    cache. Save the .blend first bakes are stored beside it"""
     bl_idname = "arachne.bake_dew"
     bl_label = "Bake Dew for Render"
 
@@ -612,7 +612,7 @@ class ARN_OT_bake_dew(Operator):
     def execute(self, context):
         if not bpy.data.is_saved:
             self.report({'ERROR'},
-                        "Save the .blend file first — simulation bakes are "
+                        "Save the .blend file first, simulation bakes are "
                         "stored next to it.")
             return {'CANCELLED'}
         scene = context.scene
@@ -625,7 +625,7 @@ class ARN_OT_bake_dew(Operator):
         finally:
             scene.frame_set(frame)
         self.report({'INFO'},
-                    "Dew simulation baked — renders now replay it exactly.")
+                    "Dew simulation baked, renders now replay it exactly.")
         return {'FINISHED'}
 
 

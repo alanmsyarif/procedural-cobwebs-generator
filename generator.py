@@ -77,7 +77,7 @@ def _live_update(self, context):
 
 
 def schedule_live_update():
-    """Ask for a live rebuild from outside a property callback — moving the
+    """Ask for a live rebuild from outside a property callback, moving the
     emitter or the aim target changes the web just as much as any slider
     does. Coalesced through the same one-shot timer. Returns True if a
     rebuild was queued, so callers can fall back to carrying anchors when
@@ -142,7 +142,7 @@ class ARN_WebProps(PropertyGroup):
     cobweb_jump: FloatProperty(
         name="Jump Distance", default=0.4, min=0.01, max=10.0,
         subtype='DISTANCE',
-        description="Max distance a spider jumps per step — larger is "
+        description="Max distance a spider jumps per step, larger is "
                     "more chaotic, smaller is denser", update=_live_update)
     cobweb_bridge: FloatProperty(
         name="Bridge Bias", default=0.5, min=0.0, max=1.0,
@@ -156,7 +156,7 @@ class ARN_WebProps(PropertyGroup):
         name="Clumping", default=0.0, min=0.0, max=1.0,
         description="Random clumping: spiders are drawn toward a few "
                     "random attractor spots, knitting dense knots there "
-                    "with sparser spans between — the uneven density of "
+                    "with sparser spans between the uneven density of "
                     "real cobwebs (0 = even, 1 = strong clumps)",
         update=_live_update)
     # ---- web shot ---------------------------------------------------------
@@ -175,23 +175,11 @@ class ARN_WebProps(PropertyGroup):
     shot_aim_collection: PointerProperty(
         name="Aim Collection", type=bpy.types.Collection,
         description="Fire at every object in this collection, one per burst "
-                    "in turn (overrides the single Aim Target). With Bursts "
-                    "3 and two objects in here the volleys go first, second, "
-                    "first — so a burst still leaves one clean cord at one "
-                    "thing. Members no burst reaches are ignored completely, "
-                    "so more targets than Bursts just wastes the extras: "
-                    "raise Bursts to use them. Each volley can only stick to "
-                    "its own target and whatever mesh you had selected — "
-                    "targets do not block each other, so clustered ones stay "
-                    "separate webs instead of trading cords",
+                    "in turn (overrides the single Aim Target).",
         update=_live_update)
     shot_stick_emitter: BoolProperty(
         name="Stick To Emitter", default=True,
-        description="The muzzle end stays attached to the emitter and is "
-                    "carried along as it moves and turns — the same way an "
-                    "impact point sticks to the geometry it hit — so the "
-                    "web trails a moving hand instead of hanging in the air "
-                    "where it fired. GPU solver only",
+        description="The muzzle end stays attached to the emitter.",
         update=_live_update)
     shot_count: IntProperty(
         name="Shots", default=36, min=1, max=400,
@@ -216,16 +204,11 @@ class ARN_WebProps(PropertyGroup):
     shot_speed: FloatProperty(
         name="Shot Speed", default=60.0, min=0.5, max=2000.0,
         description="Travel speed of the flying tip in metres per second "
-                    "— sets how many frames a strand takes to reach its "
+                    "sets how many frames a strand takes to reach its "
                     "impact point", update=_live_update)
     shot_range: FloatProperty(
         name="Range", default=12.0, min=0.1, max=500.0, subtype='DISTANCE',
-        description="How far a strand flies before giving up. A shot that "
-                    "hits nothing within range keeps a free, unpinned end. "
-                    "Ignored while an Aim Target is set: the range then "
-                    "follows the distance to the target, so shots reach it "
-                    "however far it is and the ones the spread throws wide "
-                    "stop level with it instead of sailing past",
+        description="How far a strand flies before giving up.",
         update=_live_update)
     shot_spread: FloatProperty(
         # ANGLE properties are stored in radians and only displayed in
@@ -237,21 +220,18 @@ class ARN_WebProps(PropertyGroup):
         update=_live_update)
     shot_whip: FloatProperty(
         name="Whip", default=0.0, min=0.0, max=2.0,
-        description="Sideways wander the strand carries in flight — 0 = "
+        description="Sideways wander the strand carries in flight 0 = "
                     "dead straight lines, high = lashing arcs. Several "
                     "waves per strand, so no two bend alike",
         update=_live_update)
     shot_clot: FloatProperty(
         name="Clot", default=0.5, min=0.0, max=0.95,
         description="How far the burst travels as a single clot of web "
-                    "fluid before it opens into separate strands, as a "
-                    "fraction of the flight. 0 = strands fan out straight "
-                    "from the muzzle, 0.8 = a tight blob that only bursts "
-                    "open just before it lands", update=_live_update)
+                    , update=_live_update)
     shot_clot_size: FloatProperty(
         name="Clot Thickness", default=0.005, min=0.001, max=2.0,
         subtype='DISTANCE',
-        description="Radius of the travelling clot. Keep it small — a thin "
+        description="Radius of the travelling clot. Keep it small a thin "
                     "cord reads as one rope, and the threads binding the "
                     "fibres together stay invisible inside it",
         update=_live_update)
@@ -263,15 +243,12 @@ class ARN_WebProps(PropertyGroup):
     # panel-only: no update hook, folding a section rebuilds nothing
     shot_advanced: BoolProperty(
         name="Advanced", default=False,
-        description="Flight shaping and impact splat — the dials you set "
+        description="Flight shaping and impact splat the dials you set "
                     "once for a look and leave alone")
     shot_arc: FloatProperty(
         name="Arc", default=0.0, min=-2.0, max=2.0,
         description="Lob: the strand rides up over the straight line and "
-                    "drops onto the impact point, peaking about three "
-                    "quarters of the way there — silk thrown rather than "
-                    "fired. Height as a fraction of the shot length; "
-                    "negative arcs under the line", update=_live_update)
+                    "drops onto the impact point", update=_live_update)
     shot_slack: FloatProperty(
         name="Slack", default=0.08, min=0.0, max=1.0,
         description="Droop built into a landed strand, as a fraction of "
@@ -296,7 +273,7 @@ class ARN_WebProps(PropertyGroup):
         description="Extra strands strung between shots already fired, "
                     "webbing the burst together. Each one costs Detail "
                     "vertices before Strandify, then Profile Resolution "
-                    "again on top — the densest single thing in the web, so "
+                    "again on top the densest single thing in the web, so "
                     "the slider stops at 400 and higher values are typed",
         update=_live_update)
 
@@ -337,9 +314,7 @@ class ARN_WebProps(PropertyGroup):
     detail: IntProperty(
         name="Detail", default=2, min=1, max=5,
         description="Sub-points per thread span (sag resolution for the "
-                    "solver and the scallops). On a Web Shot it sizes the "
-                    "opened fan only — the travelling clot is a braid, so "
-                    "its resolution comes from Clot Twist instead",
+                    "solver and the scallops).",
         update=_live_update)
     anchors: IntProperty(
         name="Anchor Threads", default=5, min=1, max=16,
@@ -353,7 +328,7 @@ class ARN_WebProps(PropertyGroup):
     plane: EnumProperty(
         name="Plane",
         items=[('XZ', "XZ (vertical)",
-                "Vertical web — sags naturally under -Z gravity"),
+                "Vertical web, sags naturally under -Z gravity"),
                ('XY', "XY (horizontal)", "Flat web in the ground plane")],
         default='XZ', update=_live_update)
 
@@ -363,7 +338,7 @@ class ARN_WebProps(PropertyGroup):
         description="Rebuild the last generated web instantly as you tweak "
                     "the parameters above. Regenerating changes the "
                     "topology, so this stands down while the solver is "
-                    "showing rather than restarting its simulation — switch "
+                    "showing rather than restarting its simulation, switch "
                     "the Arachne GPU Apply modifier's viewport display off "
                     "to tweak live and keep the solver's settings",
         update=_live_update)
@@ -780,7 +755,7 @@ def _build_cobweb(context, p, env_objs):
 
     # ---- spiders spin threads ----
     def spawn_on_thread():
-        """Split a random segment and return the new junction vertex —
+        """Split a random segment and return the new junction vertex
         keeps every spawn topologically attached to the web."""
         k = rnd.randrange(len(segs))
         ia, ib = segs[k]
@@ -793,7 +768,7 @@ def _build_cobweb(context, p, env_objs):
     spiders = [spawn_on_thread() for _ in range(p.cobweb_spiders)]
 
     # random clumping: a few attractor centres pull spiders into dense
-    # local knots, leaving sparser spans between — the uneven density of
+    # local knots, leaving sparser spans between the uneven density of
     # real cobwebs. Each spider gravitates toward its assigned centre.
     clump = p.cobweb_clump
     clump_centers = []
@@ -1084,7 +1059,7 @@ def _build_shot(context, p, env_objs):
     def outside(co, clear=8e-3):
         """Lift a point back out of whatever it landed inside.
 
-        Silk is laid out analytically — lobbed, whipped, sagging — with no
+        Silk is laid out analytically lobbed, whipped, sagging with no
         idea the target is in the way, so spans near an impact and cross
         threads strung between two landed tips end up buried in the surface.
         Nearest-surface tells us how far in; the normal takes it back out."""
@@ -1238,7 +1213,7 @@ def _build_shot(context, p, env_objs):
     # The emitter fires Bursts volleys of Shots each, Burst Gap frames
     # apart. Every volley is built on its own: its own clot, its own
     # lashing and its own cross threads, from the emitter's location at the
-    # moment it goes off — so a moving hand leaves a separate web behind
+    # moment it goes off, so a moving hand leaves a separate web behind
     # per shot rather than one fan smeared along its path.
     for burst in range(max(p.shot_bursts, 1)):
         b_start = float(p.shot_start) + burst * p.shot_burst_gap
@@ -1340,7 +1315,7 @@ def _build_shot(context, p, env_objs):
         # the clot has volume: each strand sits at its own spot inside the mass
         clot_r = p.shot_clot_size
         e1_c, e2_c = up_c, np.cross(ax_c, up_c)
-        # The rope meanders as a unit — shared by every strand, so the bundle
+        # The rope meanders as a unit shared by every strand, so the bundle
         # snakes instead of running dead straight like a cable.
         #
         # Two low-frequency waves only ever produced one broad bow across
@@ -1387,7 +1362,7 @@ def _build_shot(context, p, env_objs):
         for fire, muzzle, dirv, end, stick, hit_n, L in fired:
             flight = (L / speed) * fps           # frames the tip is airborne
             # where this strand sits in the rope's cross-section, and how its
-            # braid is phased — sqrt keeps the mass evenly filled
+            # braid is phased sqrt keeps the mass evenly filled
             c_rad = clot_r * math.sqrt(rnd.random())
             c_ph = rnd.uniform(0.0, 2.0 * math.pi)
             # fibres in a real bundle wander in and out, touching and parting
@@ -1496,7 +1471,7 @@ def _build_shot(context, p, env_objs):
         #   * ring threads run between angularly neighbouring strands at a
         #     similar distance out, the concentric pass of a real orb web
         #   * bridge threads hop to whichever strand is actually nearest,
-        #     sometimes chaining on to a third — the irregular part
+        #     sometimes chaining on to a third the irregular part
         # Nothing is strung inside the clot: while the burst is still one mass
         # a cross thread would just be a chord through overlapping strands, and
         # those repeated chords are what made the geometry look stamped out.
@@ -1524,7 +1499,7 @@ def _build_shot(context, p, env_objs):
                 prev = ni
                 inner.append(ni)
             segs.append([prev, vb])
-            # loose fibres trailing off the thread — every junction in a real
+            # loose fibres trailing off the thread every junction in a real
             # web frays, and it is most of what makes one read as silk
             if inner and rnd.random() < 0.4:
                 root = rnd.choice(inner)
@@ -1538,7 +1513,7 @@ def _build_shot(context, p, env_objs):
                     prev2 = nv
 
         # ---- rope: lash the clot together ----------------------------
-        # Bunching the strands at build time is not enough — once the
+        # Bunching the strands at build time is not enough once the
         # solver runs, gravity and the constraints pull them apart into a
         # ribbon. Short binder threads between neighbours at every clot
         # segment (plus a few chords across the bundle) hold the mass
@@ -1569,7 +1544,7 @@ def _build_shot(context, p, env_objs):
                     if prev is not None:
                         segs.append([prev, vi])
                     prev = vi
-                    # bite onto the nearest fibre — that tie is what binds
+                    # bite onto the nearest fibre that tie is what binds
                     if s % 2 == 0:
                         best, bd = None, 1e18
                         for a in ring:
@@ -1584,7 +1559,7 @@ def _build_shot(context, p, env_objs):
             # Ties between neighbouring fibres at every station. These are
             # what actually holds the cord: they are short, so radial
             # separation stretches them immediately. Diagonal ties along the
-            # bundle look nicer but barely constrain anything — their length
+            # bundle look nicer but barely constrain anything their length
             # is dominated by the axial span, so fibres drift centimetres
             # before they pull. Keeping Clot Thickness small hides them.
             for pos, a in enumerate(ring):
@@ -1597,7 +1572,7 @@ def _build_shot(context, p, env_objs):
                     binders.append((va, vb))
 
             # chords straight across the bundle at every station. Neighbour
-            # ties alone leave the cross-section free to inflate — each
+            # ties alone leave the cross-section free to inflate each
             # fibre only feels its two neighbours, and 5% of slack per link
             # adds up around the ring. A chord spans the diameter, so it
             # caps the thickness.
@@ -1652,7 +1627,7 @@ def _build_shot(context, p, env_objs):
                         if not np.isfinite(d).any():
                             continue
                         # partition, not a full sort: only the three nearest
-                        # matter, and this runs once per cross thread —
+                        # matter, and this runs once per cross thread
                         # sorting the whole pool put an n log n inside the
                         # loop for nothing
                         if d.size > 3:
@@ -1704,8 +1679,8 @@ def _build_shot(context, p, env_objs):
         "value", tarr)
 
     # Muzzle anchors ride the emitter. The GPU solver carries them with its
-    # transform from the frame they fire onward — the same mechanism that
-    # keeps an impact point stuck to the geometry it hit — so the strands
+    # transform from the frame they fire onward the same mechanism that
+    # keeps an impact point stuck to the geometry it hit so the strands
     # trail a moving emitter instead of hanging where they left it.
     if emit is not None and p.shot_stick_emitter and muzzles:
         marr = np.zeros(len(verts), dtype=np.bool_)
@@ -1719,7 +1694,7 @@ def _build_shot(context, p, env_objs):
     # only millimetres long, and the strand segments themselves, which the
     # braid's point density makes short. Either way a jostle passes the tear
     # threshold in relative terms and the cord bursts apart. Flag the lot
-    # unbreakable — the clot opens into strands, it does not fray.
+    # unbreakable the clot opens into strands, it does not fray.
     if binders:
         want = {frozenset((mesh_idx[a], mesh_idx[b])) for a, b in binders}
         flags = np.zeros(len(me.edges), dtype=np.bool_)
@@ -1745,7 +1720,7 @@ class ARN_OT_generate_web(Operator):
         obj = build_web_object(context, p, env)
         if obj is None:
             self.report({'ERROR'},
-                        "Nothing to build — Chaotic Cobweb needs selected "
+                        "Nothing to build, Chaotic Cobweb needs selected "
                         "mesh geometry to anchor to (select a corner/prop, "
                         "then generate); Web Shot needs at least one shot "
                         "that travels a nonzero distance.")
@@ -1773,7 +1748,7 @@ def _safe_register(cls):
 
 
 def register():
-    # a pointer property referencing a ghost class blocks its eviction —
+    # a pointer property referencing a ghost class blocks its eviction
     # clear the pointer first, then classes can be safely re-registered
     if hasattr(bpy.types.Scene, "swf_web"):
         try:
