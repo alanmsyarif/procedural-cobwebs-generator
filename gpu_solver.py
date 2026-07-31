@@ -524,13 +524,7 @@ class ARN_GPUProps(PropertyGroup):
     tension: FloatProperty(
         name="Tension", default=0.8, min=0.0, max=2.0,
         description="1 = taut threads, rest lengths exactly as built; "
-                    "lower = slack that droops into catenaries. Above 1 "
-                    "pre-tensions the silk — rest lengths shorter than "
-                    "built, so the threads keep pulling and the last of the "
-                    "gravity droop comes out (2 = 15% shorter). Tearing "
-                    "measures strain against rest, so pre-tensioned threads "
-                    "start out closer to snapping — the panel prints what "
-                    "is left of the Tear Threshold")
+                    "lower = slack that droops into catenaries.")
     resist_compression: BoolProperty(
         name="Resist Compression", default=False,
         description="Off = silk-like unilateral constraints (threads pull "
@@ -575,9 +569,9 @@ class ARN_GPUProps(PropertyGroup):
         description="Collision object (sphere approximation or baked "
                     "mesh SDF depending on Shape)")
     pull_collider: BoolProperty(
-        name="Web Pulls Collider", default=False,
+        name="Web Pulls Collider (Experimental)", default=False,
         description="Two-way coupling: threads stuck to the Collider haul "
-                    "it around instead of only being held by it — fire a "
+                    "it around instead of only being held by it fire a "
                     "web shot at a prop and drag it over. The object is "
                     "moved by Blender's rigid body sim, so its mass, "
                     "friction, gravity and tumble come from the Physics "
@@ -586,18 +580,18 @@ class ARN_GPUProps(PropertyGroup):
         name="Pull Strength", default=200.0, min=0.0, max=100000.0,
         description="Scales thread stretch into force field strength. The "
                     "main dial: raise it if the web tugs but nothing moves. "
-                    "Not newtons — rigid body force fields have no physical "
+                    "Not newtons rigid body force fields have no physical "
                     "unit, so tune it by eye")
     collider_static: BoolProperty(
         name="Static", default=False, update=_static_update,
-        description="Make the collider a Passive rigid body — it holds the "
+        description="Make the collider a Passive rigid body it holds the "
                     "web but the web can never move it. Off = Active, free "
                     "to be pulled")
     collider_collection: PointerProperty(
         name="Collider Collection", type=bpy.types.Collection,
         description="Collide against every mesh in this collection "
                     "(overrides the single Collider). Always baked as a "
-                    "merged mesh SDF; treated as static — for animated "
+                    "merged mesh SDF; treated as static for animated "
                     "collision use a single Collider object instead")
     collision_offset: FloatProperty(name="Collision Offset", default=0.01,
                                     min=0.0, max=1.0)
@@ -605,13 +599,11 @@ class ARN_GPUProps(PropertyGroup):
     stickiness: FloatProperty(
         name="Stickiness", default=0.0, min=0.0, max=1.0,
         description="How readily threads adhere to the collider on "
-                    "contact: a fraction of contacting points latch to "
-                    "the surface and stay stuck (0 = slide off freely, "
-                    "1 = every contact sticks — the web drapes and clings)")
+                    )
     stick_follow: BoolProperty(
         name="Stuck Follows Collider", default=True,
-        description="Threads anchored on the collider — a web shot's impact "
-                    "points, or contacts latched by Stickiness — are carried "
+        description="Threads anchored on the collider a web shot's impact "
+                    "points, or contacts latched by Stickiness are carried "
                     "along as it moves and turns, instead of staying behind "
                     "in mid-air. Single collider object only")
     seed: IntProperty(name="Seed", default=0, min=0)
@@ -636,7 +628,7 @@ class ARN_OT_add_gpu_solver(Operator):
         others = [o for o in context.selected_objects
                   if o is not obj and o.type == 'MESH']
         enable_gpu_solver(context, obj, others[0] if others else None)
-        self.report({'INFO'}, "GPU solver active — play from frame 1.")
+        self.report({'INFO'}, "GPU solver active, play from frame 1.")
         return {'FINISHED'}
 
 
@@ -664,7 +656,7 @@ class ARN_OT_setup_pull(Operator):
         if g.collider_collection is not None:
             self.report({'ERROR'},
                         "Rigid body pull works on a single Collider object, "
-                        "not a collection — clear Collider Collection.")
+                        "not a collection, clear Collider Collection.")
             return {'CANCELLED'}
 
         if scene.rigidbody_world is None:
@@ -714,7 +706,7 @@ class ARN_OT_setup_pull(Operator):
 
         g.pull_collider = True
         self.report({'INFO'},
-                    "Rigid body pull ready — play from frame 1.")
+                    "Rigid body pull ready, play from frame 1.")
         return {'FINISHED'}
 
 
