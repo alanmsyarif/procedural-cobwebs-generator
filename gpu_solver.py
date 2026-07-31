@@ -223,6 +223,12 @@ def _on_frame(scene, depsgraph=None):
     from . import gpu_native
     if gpu_native.native_broken():
         return
+    # a Web Shot build steps the timeline to read its animated emitter and
+    # targets. Those frames are a measurement, not playback — stepping the
+    # sim through them would advance (or reset) it behind the user's back
+    from .generator import sampling_frames
+    if sampling_frames():
+        return
     rendering = _render_active()
     fps = scene.render.fps / scene.render.fps_base
     dt = 1.0 / max(fps, 1.0)
@@ -282,17 +288,28 @@ def _on_frame(scene, depsgraph=None):
 # Cobweb is spun onto its selected surfaces, so moving or scaling either is
 # as much a change to the web as any slider.
 _IN_DEPSGRAPH = False
-_SEEN = {}          # object name -> world matrix last acted on
+_SEEN = {}          # object name -> (frame, world matrix) last acted on
 
 
 def _moved(obj):
+    """Has the user moved this object since the last tick?
+
+    Frame-aware, because an animated host moves on every frame of playback
+    and a rebuild per frame is both wasted work and a web that flickers as
+    it is scrubbed. A transform that changed across a frame change is the
+    animation playing and is not a change to the web — the build already
+    reads the animation at the frames the volleys fire on, so the result is
+    the same web whatever frame you are parked on. Only a change made while
+    the timeline stood still is a drag."""
     if obj is None:
         return False
     cur = tuple(tuple(r) for r in obj.matrix_world)
-    if _SEEN.get(obj.name) == cur:
-        return False
-    _SEEN[obj.name] = cur
-    return True
+    frame = bpy.context.scene.frame_current
+    was = _SEEN.get(obj.name)
+    _SEEN[obj.name] = (frame, cur)
+    if was is None:
+        return True
+    return was[0] == frame and was[1] != cur
 
 
 def _aim_moved(p):
@@ -344,6 +361,10 @@ def _on_depsgraph(scene, depsgraph=None):
         return
     from . import gpu_native
     if gpu_native.native_broken():
+        return
+    # frames we set ourselves to read an animated emitter (see _on_frame)
+    from .generator import sampling_frames
+    if sampling_frames():
         return
     _IN_DEPSGRAPH = True
     try:

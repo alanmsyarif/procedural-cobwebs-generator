@@ -4,7 +4,7 @@
 # version in __init__.py. Blender caches imported modules, so copying new
 # files into the addons folder changes nothing until scripts are reloaded —
 # the panel showing an older build than the Add-ons list is how that shows.
-BUILD = "4.2.1 taut shots"
+BUILD = "4.3.0 animated emitter"
 
 #
 # NOTE: the `swf_` prefix on attributes and custom properties below is
@@ -42,6 +42,12 @@ A_EMIT    = "swf_emit"      # POINT bool   — muzzle anchor: rides the web
 # Mesh-datablock custom property: name of the object a Web Shot was fired
 # from. The GPU solver looks it up to carry A_EMIT points along with it.
 P_EMITTER = "swf_emitter"
+
+# Mesh-datablock custom property: [[fire frame, x, y, z], ...] — where the
+# emitter stood at each volley, baked at build time. The solver subtracts
+# these to get each muzzle's offset, instead of re-deriving an animated
+# emitter's position itself (see gpu_native._anchor_base).
+P_EMIT_AT = "swf_emit_at"
 
 # Object custom property: name of the wind-field empty that feeds the web's
 # pull into Blender's rigid body sim (see gpu_solver's pull field).

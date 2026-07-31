@@ -24,10 +24,10 @@ vertices → **Pin / Unpin**.
 
 ## Web types
 
-**Orb Web** classic radial/spiral web. Scalloped sag, uneven spiral
+**Orb Web** — classic radial/spiral web. Scalloped sag, uneven spiral
 spacing, damage gaps, asymmetry, wavy radials, tangle threads.
 
-**Chaotic Cobweb** spider-spun 3D webbing anchored to your scene
+**Chaotic Cobweb** — spider-spun 3D webbing anchored to your scene
 geometry (Pixar *Toy Story 4* construction). Select a corner, prop or room
 and simulated spiders spin between the surfaces.
 
@@ -41,11 +41,13 @@ and simulated spiders spin between the surfaces.
 its own frame, flies at **Shot Speed**, sticks where it hits. A miss keeps
 a free end that whips.
 
-- **Emitter** its animated location is sampled per shot, so a moving hand
-  leaves each strand anchored where it fired. Unset = 3D cursor.
+- **Emitter** animate it and each volley is read at the frame it goes off,
+  location and aim direction both, so a moving hand leaves every strand
+  anchored where it fired and pointing where it pointed. Unset = 3D cursor.
 - **Aim Target** fire at it. Always part of the hit test, and it sets the
   range: shots reach it however far it is, and wide ones stop level with it
-  instead of sailing past.
+  instead of sailing past. Animated targets are aimed at — and hit — where
+  they will be at that volley's frame, not where the playhead left them.
 - **Aim Collection** overrides Aim Target and fires at each member in turn,
   one per burst: two objects across three bursts goes first, second, first.
   One target per volley keeps each burst reading as a single cord thrown at
@@ -66,6 +68,13 @@ a free end that whips.
 Unfired strands are frozen until their shot goes off, so nothing has sagged
 before it flies.
 
+**Animated emitters and targets.** Reading location F-curves only sees a
+plain keyframe, so the build steps the scene to each volley's own frame and
+reads the transforms — and the target's collision geometry — off the
+evaluated depsgraph instead. Parenting to a rig or a bone, constraints, NLA
+strips and drivers all work. A setup with nothing animated never sets a
+frame and costs exactly what it did before.
+
 ## Live Update
 
 On by default. Every parameter rebuilds the tracked web as you drag, so you
@@ -74,6 +83,11 @@ from counts as a change too: the Emitter or Aim Target for a Web Shot (where
 the emitter is decides where every strand starts), and the selected anchor
 meshes for a Chaotic Cobweb move or scale a wall and the web re-spins onto
 it, staying stuck to the corner instead of hanging in space.
+
+Only a drag counts. Playing back or scrubbing moves an animated emitter on
+every frame, and rebuilding there would be wasted work — the build reads the
+animation at the frames the volleys fire on, so the web is the same one
+whatever frame you are parked on.
 
 **It stands down while the solver is showing.** Regenerating swaps the mesh
 out and would restart the sim from scratch on every mouse move, so the panel
