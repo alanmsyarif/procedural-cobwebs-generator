@@ -276,9 +276,11 @@ def _on_frame(scene, depsgraph=None):
 # Dragging the emitter is not a frame change, so _on_frame never fires and
 # the web sits there while the thing it is stuck to walks away. This runs on
 # any interactive edit instead: anchors are re-placed on their host, and
-# with Live Update on a Web Shot is rebuilt outright — where the emitter is
-# decides where every strand starts, which way it flies and what it hits, so
-# moving it is as much a change to the web as any slider.
+# with Live Update on the web is rebuilt outright when the geometry it was
+# built from is transformed — where the emitter is decides where every Web
+# Shot strand starts, which way it flies and what it hits, and a Chaotic
+# Cobweb is spun onto its selected surfaces, so moving or scaling either is
+# as much a change to the web as any slider.
 _IN_DEPSGRAPH = False
 _SEEN = {}          # object name -> world matrix last acted on
 
@@ -304,6 +306,35 @@ def _aim_moved(p):
     return _moved(p.shot_aim)
 
 
+def _env_moved(p):
+    """Has any of a Chaotic Cobweb's anchor geometry been moved or scaled?
+    That web is spun onto those surfaces — every thread is raycast against
+    them — so dragging or scaling a wall is as much a change to the web as
+    any slider. Same non-short-circuit rule as _aim_moved."""
+    from .generator import env_objects
+    return any([_moved(o) for o in env_objects(p.live_obj)])
+
+
+def _hosts_moved(p):
+    """Whether the geometry this web is built from has been transformed,
+    per mode. Modes with no such geometry never rebuild from a drag."""
+    if p.mode == 'SHOT':
+        return _moved(p.shot_emitter) | _aim_moved(p)
+    if p.mode == 'CHAOS':
+        return _env_moved(p)
+    return False
+
+
+def note_hosts(p):
+    """Record where a freshly generated web's host geometry currently is,
+    so the depsgraph tick the generation itself causes doesn't read as a
+    drag and rebuild the web a second time."""
+    try:
+        _hosts_moved(p)
+    except Exception:
+        pass
+
+
 @persistent
 def _on_depsgraph(scene, depsgraph=None):
     global _IN_DEPSGRAPH
@@ -317,9 +348,8 @@ def _on_depsgraph(scene, depsgraph=None):
     _IN_DEPSGRAPH = True
     try:
         p = getattr(scene, "swf_web", None)
-        if (p is not None and p.mode == 'SHOT' and p.live
-                and p.live_obj is not None
-                and (_moved(p.shot_emitter) | _aim_moved(p))):
+        if (p is not None and p.live and p.live_obj is not None
+                and _hosts_moved(p)):
             from .generator import schedule_live_update
             # declines once the solver owns the mesh — fall through to
             # carrying the anchors instead of restarting the simulation

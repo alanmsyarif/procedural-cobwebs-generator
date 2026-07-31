@@ -69,9 +69,11 @@ before it flies.
 ## Live Update
 
 On by default. Every parameter rebuilds the tracked web as you drag, so you
-can dial in the look before simulating. Moving the Emitter or Aim Target
-counts as a change too — where the emitter is decides where every strand
-starts.
+can dial in the look before simulating. Moving the geometry a web was built
+from counts as a change too: the Emitter or Aim Target for a Web Shot (where
+the emitter is decides where every strand starts), and the selected anchor
+meshes for a Chaotic Cobweb — move or scale a wall and the web re-spins onto
+it, staying stuck to the corner instead of hanging in space.
 
 **It stands down while the solver is showing.** Regenerating swaps the mesh
 out and would restart the sim from scratch on every mouse move, so the panel

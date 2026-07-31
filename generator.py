@@ -126,15 +126,15 @@ class ARN_WebProps(PropertyGroup):
         description="Anchor threads cast between the selected surfaces "
                     "before spinning starts", update=_live_update)
     cobweb_spiders: IntProperty(
-        name="Spiders", default=6, min=1, max=32,
+        name="Spiders", default=12, min=1, max=32,
         description="Concurrent spinners (Pixar used 5-10)",
         update=_live_update)
     cobweb_steps: IntProperty(
-        name="Spin Steps", default=600, min=10, max=3000,
+        name="Spin Steps", default=900, min=10, max=3000,
         description="Total threads spun (Pixar used 50-1000)",
         update=_live_update)
     cobweb_spread: FloatProperty(
-        name="Spread", default=0.6, min=0.0, max=1.0,
+        name="Spread", default=0.9, min=0.0, max=1.0,
         description="0 = spiders knit dense local clumps, 1 = spinning "
                     "distributes uniformly across the whole volume "
                     "(spiders relocate often and take long bridging jumps)",
@@ -145,7 +145,7 @@ class ARN_WebProps(PropertyGroup):
         description="Max distance a spider jumps per step, larger is "
                     "more chaotic, smaller is denser", update=_live_update)
     cobweb_bridge: FloatProperty(
-        name="Bridge Bias", default=0.5, min=0.0, max=1.0,
+        name="Bridge Bias", default=0.45, min=0.0, max=1.0,
         description="How much the anchor threads commit to spanning "
                     "gaps: 0 = local/corner webbing hugging each surface, "
                     "1 = long cables strung between separate pieces of "
@@ -153,11 +153,23 @@ class ARN_WebProps(PropertyGroup):
                     "hang between floating objects",
         update=_live_update)
     cobweb_clump: FloatProperty(
-        name="Clumping", default=0.0, min=0.0, max=1.0,
+        name="Clumping", default=1.0, min=0.0, max=1.0,
         description="Random clumping: spiders are drawn toward a few "
                     "random attractor spots, knitting dense knots there "
                     "with sparser spans between the uneven density of "
                     "real cobwebs (0 = even, 1 = strong clumps)",
+        update=_live_update)
+    # Sag and detail are per-mode: a cobweb's threads hang far straighter
+    # than an orb web's capture spiral and want finer subdivision, so these
+    # shadow spiral_sag / detail rather than sharing (and shifting) them.
+    cobweb_sag: FloatProperty(
+        name="Thread Sag", default=0.1, min=0.0, max=1.0,
+        description="How much each spun thread droops between its two ends",
+        update=_live_update)
+    cobweb_detail: IntProperty(
+        name="Detail", default=4, min=1, max=5,
+        description="Sub-points per thread span (sag resolution for the "
+                    "solver).",
         update=_live_update)
     # ---- web shot ---------------------------------------------------------
     shot_emitter: PointerProperty(
@@ -250,7 +262,7 @@ class ARN_WebProps(PropertyGroup):
         description="Lob: the strand rides up over the straight line and "
                     "drops onto the impact point", update=_live_update)
     shot_slack: FloatProperty(
-        name="Slack", default=0.08, min=0.0, max=1.0,
+        name="Slack", default=0.0, min=0.0, max=1.0,
         description="Droop built into a landed strand, as a fraction of "
                     "its length (the solver takes it from there)",
         update=_live_update)
@@ -368,6 +380,20 @@ def build_web_object(context, p, env_objs=None):
     return _finalize(context, me, name)
 
 
+def env_objects(obj):
+    """The anchor geometry a web was generated against, restored from the
+    names stored on it at generation time. Objects deleted or renamed
+    since simply drop out."""
+    raw = obj.get("swf_env") if obj is not None else None
+    if not raw:
+        return []
+    try:
+        return [bpy.data.objects[n] for n in json.loads(raw)
+                if n in bpy.data.objects]
+    except Exception:
+        return []
+
+
 def regenerate_live(context, p):
     """Rebuild the tracked live web in place: swap fresh mesh data into
     the existing object so its transform, name and any downstream edits
@@ -378,14 +404,7 @@ def regenerate_live(context, p):
         return
     if obj.type != 'MESH' or obj.mode != 'OBJECT':
         return
-    env = []
-    raw = obj.get("swf_env")
-    if raw:
-        try:
-            env = [bpy.data.objects[n] for n in json.loads(raw)
-                   if n in bpy.data.objects]
-        except Exception:
-            env = []
+    env = env_objects(obj)
     res = build_web_data(context, p, env)
     if res is None:                              # invalid — keep old data
         return
@@ -874,11 +893,11 @@ def _build_cobweb(context, p, env_objs):
         except ValueError:
             pass
 
-    segn = max(p.detail, 1) + 1
+    segn = max(p.cobweb_detail, 1) + 1
     for ia, ib in segs:
         a, b = verts[ia], verts[ib]
         length = np.linalg.norm(b - a)
-        droop = length * p.spiral_sag * rnd.uniform(0.2, 1.0)
+        droop = length * p.cobweb_sag * rnd.uniform(0.2, 1.0)
         prev = bverts[ia]
         for s in range(1, segn):
             t = s / segn
@@ -1729,6 +1748,10 @@ class ARN_OT_generate_web(Operator):
         # can rebuild it in place as parameters change
         obj["swf_env"] = json.dumps([o.name for o in env])
         p.live_obj = obj
+        # baseline the host transforms now — generating tags the depsgraph,
+        # and unseen hosts there would read as a drag and rebuild instantly
+        from .gpu_solver import note_hosts
+        note_hosts(p)
         return {'FINISHED'}
 
 

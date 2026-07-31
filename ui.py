@@ -210,9 +210,9 @@ class ARN_PT_main(Panel):
             col.prop(p, "cobweb_clump")
             col.prop(p, "cobweb_bridge")
             col.prop(p, "radius", text="Anchor Span")
-            col.prop(p, "spiral_sag", text="Thread Sag")
+            col.prop(p, "cobweb_sag")
             col.prop(p, "jitter")
-            col.prop(p, "detail")
+            col.prop(p, "cobweb_detail")
             col.prop(p, "seed")
             col.label(text="Select anchor geometry first.", icon='INFO')
         elif p.mode == 'SHOT':

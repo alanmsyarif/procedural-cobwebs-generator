@@ -4,7 +4,7 @@
 # version in __init__.py. Blender caches imported modules, so copying new
 # files into the addons folder changes nothing until scripts are reloaded —
 # the panel showing an older build than the Add-ons list is how that shows.
-BUILD = "4.0.0 multi-target"
+BUILD = "4.2.1 taut shots"
 
 #
 # NOTE: the `swf_` prefix on attributes and custom properties below is

@@ -22,7 +22,7 @@
 bl_info = {
     "name": "Arachne",
     "author": "Amsy",
-    "version": (4, 0, 0),
+    "version": (4, 2, 1),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar (N) > Arachne",
     "description": "Procedural webs with a native-GPU tearing solver, "
