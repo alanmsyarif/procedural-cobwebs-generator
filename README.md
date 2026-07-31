@@ -24,10 +24,10 @@ vertices → **Pin / Unpin**.
 
 ## Web types
 
-**Orb Web** — classic radial/spiral web. Scalloped sag, uneven spiral
+**Orb Web** classic radial/spiral web. Scalloped sag, uneven spiral
 spacing, damage gaps, asymmetry, wavy radials, tangle threads.
 
-**Chaotic Cobweb** — spider-spun 3D webbing anchored to your scene
+**Chaotic Cobweb** spider-spun 3D webbing anchored to your scene
 geometry (Pixar *Toy Story 4* construction). Select a corner, prop or room
 and simulated spiders spin between the surfaces.
 
