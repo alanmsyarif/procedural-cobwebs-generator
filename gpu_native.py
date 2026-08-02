@@ -33,6 +33,7 @@
 # Web Shot muzzle anchors are state 1 and placed from the emitter every
 # frame by _ANCHOR instead.
 
+import json
 import random
 import traceback
 
@@ -42,7 +43,7 @@ import bpy
 from mathutils import Vector
 
 from .constants import (A_PIN, A_SHOT, A_NOTEAR, A_GPU_POS, A_BROKEN,
-                        A_TENSION, A_EMIT, P_EMITTER)
+                        A_TENSION, A_EMIT, P_EMITTER, P_EMIT_AT)
 
 _W = 1024
 _BROKEN_FLAG = False
@@ -466,7 +467,10 @@ def rest_slack(tension):
 
     Much gentler slope on that side: the slack rate would contract the web
     by a quarter and yank the anchors, where 2.0 is 15% pre-tension and
-    already rigid.
+    already rigid. 2.0 is where the slider stops but not the dial — the
+    range runs to 5.0 (60%) for a cord that has to hold a straight line
+    across a long span, since the residual droop grows with the span and
+    what looks rigid over a metre does not over ten.
 
     0.15 is deliberate, and was briefly dropped to 0.06 to stop web shots
     tearing. That was the wrong lever — the fragility was short clot
@@ -481,23 +485,57 @@ def rest_slack(tension):
     return 1.0 - (tension - 1.0) * 0.15
 
 
-def _anchor_base(web_obj, emitter, pos, mask, fire):
+def _emitter_track(me):
+    """The generator's record of where the emitter stood at each volley,
+    as [(fire frame, world location)]. Empty for a web built before this
+    was baked."""
+    raw = me.get(P_EMIT_AT)
+    if not raw:
+        return []
+    try:
+        return [(float(row[0]), np.asarray(row[1:4], dtype=np.float64))
+                for row in json.loads(raw) if len(row) >= 4]
+    except Exception:
+        return []
+
+
+def _track_lookup(track, frame, tol=1e-3):
+    """The baked location for `frame`. Matched by nearest rather than by
+    equality: the fire frames come back out of a float32 mesh attribute,
+    which is not the value that went in."""
+    best, best_d = None, tol
+    for f, at in track:
+        d = abs(f - frame)
+        if d <= best_d:
+            best, best_d = at, d
+    return best
+
+
+def _anchor_base(web_obj, me, emitter, pos, mask, fire):
     """Bake each muzzle anchor's offset from the emitter.
 
     A muzzle is built where the emitter stood at its fire frame, so
     `built - emitter(fire)` is the offset it keeps for the rest of the
     shot. Returned as an n x 4 array (offset.xyz, 1 = is an anchor) for the
-    anchor kernel, which adds the emitter's current location back on. Both
-    ends are sampled the way the generator sampled the emitter: location
-    only, so a rotating emitter carries its silk but does not swing it."""
+    anchor kernel, which adds the emitter's current location back on.
+
+    The fire-frame end comes from the table the generator baked, which was
+    read off a properly evaluated depsgraph — parents, bones, constraints
+    and drivers included. `_obj_loc_at` is only the fallback for webs built
+    before that table existed; it sees plain location F-curves and nothing
+    else. Either way it is location only, so a rotating emitter carries its
+    silk but does not swing it."""
     base = np.zeros((len(pos), 4), np.float32)
     if fire is None or not mask.any():
         return base
     from .generator import _obj_loc_at
+    track = _emitter_track(me)
     winv = web_obj.matrix_world.inverted_safe()
     idx = np.flatnonzero(mask)
     for f in np.unique(fire[idx]):
-        at = _obj_loc_at(emitter, float(f))
+        at = _track_lookup(track, float(f))
+        if at is None:
+            at = _obj_loc_at(emitter, float(f))
         if at is None:
             continue
         local = np.asarray(winv @ Vector(at), dtype=np.float64)
@@ -730,7 +768,7 @@ class NativeState:
             if mask.any():
                 pin = np.where(mask, 1.0, pin).astype(np.float32)
                 self._assigned |= mask
-                base4 = _anchor_base(obj, self.emitter, pos, mask, fire)
+                base4 = _anchor_base(obj, me, self.emitter, pos, mask, fire)
             if base4[:, 3].max() < 0.5:
                 self.emitter = None
         self.anchors = _tex(gpu, n, 4, base4)

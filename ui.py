@@ -259,6 +259,9 @@ class ARN_PT_main(Panel):
             col.prop(p, "shot_clot")
             col.prop(p, "shot_clot_size")
             col.prop(p, "shot_clot_twist")
+            row = col.row()
+            row.enabled = p.shot_clot > 0.0
+            row.prop(p, "shot_clot_smooth")
             col.separator()
             col.prop(p, "shot_tangle")
             col.prop(p, "jitter")

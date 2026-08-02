@@ -13,6 +13,7 @@
 # tearing solver binds automatically. No bmesh operators are used, so vertex
 # references stay valid throughout.
 
+import bisect
 import json
 import math
 import random
@@ -28,7 +29,8 @@ from bpy.props import (
 )
 from bpy.types import Operator, PropertyGroup
 
-from .constants import A_PIN, A_SHOT, A_NOTEAR, A_EMIT, P_EMITTER
+from .constants import (A_PIN, A_SHOT, A_NOTEAR, A_EMIT, P_EMITTER,
+                        P_EMIT_AT)
 
 
 # A property `update` callback runs in a restricted context where editing
@@ -175,15 +177,20 @@ class ARN_WebProps(PropertyGroup):
     shot_emitter: PointerProperty(
         name="Emitter", type=bpy.types.Object,
         description="Object the strands are fired from (a hand bone's "
-                    "empty, for instance). Its animated location is "
-                    "sampled per shot, so a moving emitter leaves each "
-                    "strand anchored where it fired. Unset = 3D cursor",
+                    "empty, for instance). Animate it and every volley is "
+                    "read at the frame it goes off — location and aim "
+                    "direction both — so a moving emitter leaves each "
+                    "strand anchored where it fired. Keyframes, parenting "
+                    "to a rig or a bone, constraints and drivers all "
+                    "count. Unset = 3D cursor",
         update=_live_update)
     shot_aim: PointerProperty(
         name="Aim Target", type=bpy.types.Object,
-        description="Fire toward this object. Unset = the emitter's local "
-                    "-Z axis; with no emitter either, shots spray in all "
-                    "directions", update=_live_update)
+        description="Fire toward this object, read at each volley's frame "
+                    "so an animated target is hit where it will be. Unset "
+                    "= the emitter's local -Z axis; with no emitter "
+                    "either, shots spray in all directions",
+        update=_live_update)
     shot_aim_collection: PointerProperty(
         name="Aim Collection", type=bpy.types.Collection,
         description="Fire at every object in this collection, one per burst "
@@ -252,6 +259,17 @@ class ARN_WebProps(PropertyGroup):
         description="Turns the strands braid around the clot's axis before "
                     "it opens. 0 = parallel cables, higher = a twisted, "
                     "knotted rope", update=_live_update)
+    shot_clot_smooth: IntProperty(
+        name="Clot Smooth", default=1, min=1, max=8,
+        description="Points per braid span in the travelling clot. The "
+                    "braid is eight points per turn of Clot Twist, which "
+                    "reads as a zigzag; this cuts each of those spans "
+                    "finer. Same idea as Strandify's Smooth Segments, but "
+                    "real geometry the GPU solver simulates it, and the "
+                    "extra points sit on the true helix rather than on an "
+                    "interpolation of the coarse one. Costs vertices: 8x "
+                    "here is 8x the clot's point count on every shot",
+        update=_live_update)
     # panel-only: no update hook, folding a section rebuilds nothing
     shot_advanced: BoolProperty(
         name="Advanced", default=False,
@@ -669,6 +687,35 @@ def _rand_unit(rnd):
     return v / (np.linalg.norm(v) + 1e-12)
 
 
+def _buried(co, surf, nrm, dist, clear):
+    """Is `co` inside the surface whose nearest point is `surf`, or so close
+    to it that it should be nudged clear?
+
+    Nearest-surface hands back a face normal, and the obvious test — is the
+    offset behind it — is only meaningful when the nearest point lies in
+    that face's interior. When it lies on the face's *boundary* the plane
+    keeps going and the sign says nothing: a face plane extends past the
+    solid it belongs to, so a point metres away and a hair on the far side
+    of that plane read as "behind the face" exactly like a point buried in
+    the middle of the mesh. That is what put a single strand vertex, 4.5 m
+    short of the target and half a millimetre under the plane of its
+    bottom face, onto that face — one vertex out of a run of forty, with
+    two four-metre edges connecting it back to its neighbours.
+
+    Distance alone cannot separate the two either: a deeply buried point is
+    also far from the surface. The angle can. Inside the solid the surface
+    faces away from the point, so the offset runs roughly opposite the
+    normal; in the false case above it is very nearly tangential (cos was
+    -0.0001). Normalising turns a signed depth that scales with distance
+    into a direction test that does not."""
+    off = co - surf
+    if dist < clear:
+        # hugging the surface from either side, and `surf` is right there,
+        # so the lift is a nudge rather than a jump
+        return True
+    return float(np.dot(off, nrm)) / max(dist, 1e-12) < -0.5
+
+
 def _build_cobweb(context, p, env_objs):
     env_objs = [o for o in env_objs
                 if o.type == 'MESH' and not o.get("swf_web")]
@@ -982,6 +1029,182 @@ def _obj_loc_at(obj, frame):
     return np.asarray((parent @ basis).translation, dtype=np.float64)
 
 
+def _is_animated(obj):
+    """Can this object's world transform differ from frame to frame?
+
+    Anything up the parent chain counts: an emitter empty parented to an
+    animated rig moves without a single key of its own. Constraints and a
+    bone parent count for the same reason, and drivers and NLA strips both
+    live under animation_data."""
+    seen = set()
+    while obj is not None and obj.name not in seen:
+        seen.add(obj.name)
+        if obj.animation_data is not None or len(obj.constraints):
+            return True
+        if obj.parent is not None and obj.parent_type == 'BONE':
+            return True
+        obj = obj.parent
+    return False
+
+
+def _aim_geometry(context, env_base, aim_pool, used):
+    """Hit-test geometry as it stands right now: the shared environment
+    BVH, and per used aim target its surface sampler, its location and the
+    BVH a burst aimed at it tests against (environment plus that one
+    target).
+
+    Split out of _build_shot so an animated setup can rebuild it at each
+    volley's own frame — a target has to be hit where it will be when the
+    shot arrives, not where the playhead happened to leave it.
+
+    The rest of the pool is deliberately absent from every BVH. Reach runs
+    to 1.15x the sampled distance, so a sibling target sitting slightly
+    nearer along the same line caught shots meant for the far one, and with
+    the targets clustered that strung cords between objects each burst was
+    supposed to hit on its own. Each volley reaches only what it was aimed
+    at. Members no burst fires at are skipped entirely."""
+    env = _env_data(context, env_base) if env_base else None
+    out = []
+    for i, a in enumerate(aim_pool):
+        if i not in used:
+            out.append((None, np.zeros(3), None))
+            continue
+        is_mesh = a.type == 'MESH'
+        surf = _env_data(context, [a]) if is_mesh else None
+        if is_mesh and not env_base:
+            hit = surf                  # nothing to merge in; reuse the BVH
+        else:
+            objs = env_base + ([a] if is_mesh else [])
+            hit = _env_data(context, objs) if objs else None
+        out.append((surf,
+                    np.asarray(a.matrix_world.translation, dtype=np.float64),
+                    hit[0] if hit is not None else None))
+    return (env[0] if env is not None else None), out
+
+
+# True while _ShotHosts is stepping the scene to bake transforms. Our own
+# frame_set calls fire frame_change and depsgraph handlers, which would
+# advance the GPU solver and queue live rebuilds; both watch this and stand
+# down. Module-level rather than passed around because the handlers are
+# reached through Blender, not through our call stack.
+_SAMPLING = False
+
+
+def sampling_frames():
+    """Whether a frame change came from our own transform bake."""
+    return _SAMPLING
+
+
+class _ShotHosts:
+    """Everything about a Web Shot that depends on what frame it is.
+
+    The emitter and the aim targets can be animated — keyframed, parented
+    to a rig or a bone, driven, constrained, or moved by an NLA strip — and
+    every volley is meant to fire from wherever the emitter actually was
+    when it went off, at wherever its target actually was. Reading location
+    F-curves sees none of that past a plain keyframe, so the scene is
+    stepped to each volley's frame and the transforms are read straight off
+    the evaluated depsgraph, along with the collision geometry when the
+    thing being shot at is moving too.
+
+    A static setup pays nothing: no frame is ever set, and the geometry is
+    built once exactly as before."""
+
+    def __init__(self, context, emit, aim_pool, used, env_base,
+                 burst_start, span):
+        self.emit = emit
+        self.aim_pool = aim_pool
+        self._burst_start = burst_start
+        hosts = [o for o in ([emit] + aim_pool) if o is not None]
+        self._live = {o.name: o.matrix_world.copy() for o in hosts}
+        self.animated = any(_is_animated(o) for o in hosts + env_base)
+        self._mat = {}          # frame -> {object name: world matrix}
+        self._geo = {}          # frame -> (env BVH, per-target geometry)
+        self._keys = []
+        if self.animated:
+            # volley start and end: with Shot Interval above zero a burst
+            # spans several frames, and the emitter keeps moving through it
+            self._keys = sorted({f for b0 in burst_start
+                                 for f in ((b0,) if span <= 0.0
+                                           else (b0, b0 + span))})
+            self._bake(context, hosts, env_base, used, set(burst_start))
+        else:
+            self._static = _aim_geometry(context, env_base, aim_pool, used)
+
+    def _bake(self, context, hosts, env_base, used, geo_frames):
+        global _SAMPLING
+        scene = context.scene
+        keep, keep_sub = scene.frame_current, scene.frame_subframe
+        _SAMPLING = True
+        try:
+            for f in self._keys:
+                fi = int(math.floor(f))
+                scene.frame_set(fi, subframe=float(f) - fi)
+                self._mat[f] = {o.name: o.matrix_world.copy() for o in hosts}
+                # geometry only at the frame each volley goes off on —
+                # a BVH per burst, not per sampled instant
+                if f in geo_frames:
+                    self._geo[f] = _aim_geometry(context, env_base,
+                                                 self.aim_pool, used)
+        finally:
+            scene.frame_set(keep, subframe=keep_sub)
+            _SAMPLING = False
+
+    def matrix(self, obj, frame):
+        """World matrix of `obj` at `frame`, interpolated between the two
+        baked instants that bracket it. Falls back to where the object
+        stands now, which is the whole answer for a static setup."""
+        if obj is None:
+            return None
+        live = self._live.get(obj.name)
+        ks = self._keys
+        if not ks:
+            return live
+        if frame <= ks[0]:
+            return self._mat[ks[0]].get(obj.name, live)
+        if frame >= ks[-1]:
+            return self._mat[ks[-1]].get(obj.name, live)
+        j = bisect.bisect_right(ks, frame)
+        f0, f1 = ks[j - 1], ks[j]
+        m0 = self._mat[f0].get(obj.name, live)
+        m1 = self._mat[f1].get(obj.name, live)
+        if m0 is None or m1 is None or f1 <= f0:
+            return m0 if m0 is not None else live
+        try:
+            return m0.lerp(m1, (frame - f0) / (f1 - f0))
+        except Exception:       # pre-4.x mathutils, degenerate matrix
+            return m0
+
+    def loc(self, obj, frame):
+        m = self.matrix(obj, frame)
+        return (None if m is None
+                else np.asarray(m.translation, dtype=np.float64))
+
+    def axis(self, obj, frame):
+        """The emitter's aim direction — its local -Z — at `frame`. None
+        when there is no emitter or it is degenerate."""
+        m = self.matrix(obj, frame)
+        if m is None:
+            return None
+        a = -np.array([m[0][2], m[1][2], m[2][2]], dtype=np.float64)
+        n = float(np.linalg.norm(a))
+        return a / n if n > 1e-9 else None
+
+    def burst(self, b):
+        """(target, surface sampler, target location, hit BVH) for volley
+        `b`, read at that volley's own frame when the setup is animated.
+        The BVH falls back to the environment when the burst has no target
+        of its own to test against."""
+        env_bvh, geo = (self._geo[self._burst_start[b]] if self.animated
+                        else self._static)
+        if not self.aim_pool:
+            return None, None, np.zeros(3), env_bvh
+        i = b % len(self.aim_pool)
+        surf, now, hit = geo[i]
+        return (self.aim_pool[i], surf, now,
+                hit if hit is not None else env_bvh)
+
+
 def _cone_dir(rnd, axis, half_angle):
     """Random unit vector inside a cone of `half_angle` around `axis`."""
     ca = math.cos(min(max(half_angle, 0.0), math.pi))
@@ -1033,47 +1256,17 @@ def _build_shot(context, p, env_objs):
     env_base = [o for o in env_objs
                 if o.type == 'MESH' and not o.get("swf_web")
                 and o is not emit and o not in aim_pool]
-    env = _env_data(context, env_base) if env_base else None
-    bvh = env[0] if env is not None else None       # reassigned per burst
 
-    # Per used target: its surface (a mesh target is shot at all over, not
-    # just at its origin) and the hit test for a burst aimed at it — the
-    # shared environment plus that one target.
-    #
-    # The rest of the pool is deliberately absent. Reach runs to 1.15x the
-    # sampled distance, so a sibling target sitting slightly nearer along the
-    # same line caught shots meant for the far one, and with the targets
-    # clustered that strung cords between objects each burst was supposed to
-    # hit on its own. Each volley now reaches only what it was aimed at.
-    #
-    # Both are built once per target, never per burst — _env_data builds a
-    # BVH — and skipped entirely for members no burst reaches.
-    aim_data = []
-    for i, a in enumerate(aim_pool):
-        if i not in used:
-            aim_data.append((a, None, np.zeros(3), None))
-            continue
-        is_mesh = a.type == 'MESH'
-        surf = _env_data(context, [a]) if is_mesh else None
-        if is_mesh and not env_base:
-            hit = surf                  # nothing to merge in; reuse the BVH
-        else:
-            objs = env_base + ([a] if is_mesh else [])
-            hit = _env_data(context, objs) if objs else None
-        aim_data.append(
-            (a, surf, np.asarray(a.matrix_world.translation,
-                                 dtype=np.float64),
-             hit[0] if hit is not None else None))
-
-    # only the emitter's location is sampled per shot — its orientation is
-    # read once, so an animated aim needs an Aim Target rather than a
-    # rotating emitter
-    axis0 = None
-    if emit is not None:
-        mw = emit.matrix_world
-        a0 = -np.array([mw[0][2], mw[1][2], mw[2][2]], dtype=np.float64)
-        if np.linalg.norm(a0) > 1e-9:
-            axis0 = a0 / np.linalg.norm(a0)
+    # Where every volley goes off. The emitter, the targets and — when they
+    # are moving too — the surfaces the shots have to hit are all read at
+    # these frames, so an animated emitter fires each burst from where it
+    # actually is rather than from wherever the playhead left it.
+    burst_start = [float(p.shot_start) + b * p.shot_burst_gap
+                   for b in range(n_bursts)]
+    span = max(p.shot_count * p.shot_interval, 0.0)
+    hosts = _ShotHosts(context, emit, aim_pool, used, env_base,
+                       burst_start, span)
+    bvh = None                                      # rebound per burst
 
     def outside(co, clear=8e-3):
         """Lift a point back out of whatever it landed inside.
@@ -1089,12 +1282,13 @@ def _build_shot(context, p, env_objs):
             return co
         surf = np.asarray(near[0], dtype=np.float64)
         nrm = np.asarray(near[1], dtype=np.float64)
-        if float(np.dot(co - surf, nrm)) < clear:
+        if _buried(co, surf, nrm, float(near[3]), clear):
             return surf + nrm * clear
         return co
 
     verts, times, segs, pinned = [], [], [], set()
     muzzles = set()                 # anchors that ride the emitter
+    emit_at = {}                    # fire frame -> where the emitter was
 
     def add_vert(co, t, pin=False, muzzle_end=False):
         verts.append(np.asarray(co, dtype=np.float64))
@@ -1211,8 +1405,16 @@ def _build_shot(context, p, env_objs):
             opened_n = max(4, int(round(density)))
             return [s / opened_n for s in range(opened_n + 1)], 0
         opened_n = max(4, int(round((1.0 - clot) * density * FAN_BOOST)))
+        # Clot Smooth multiplies the braid's own count and nothing else. It
+        # is a subdivision of the spans that already exist, so clot_s still
+        # lands on `clot` exactly and every consumer that walks the clot by
+        # index (binders, the whipping ties, the neighbour lashing) follows
+        # the finer sampling without knowing about it. The cap applies
+        # before the multiply — 72 is where the braid stops gaining shape
+        # from Clot Twist alone; past that the points are the dial's job.
         braid_n = max(6, min(72, int(round(max(clot * density,
-                                              p.shot_clot_twist * 8)))))
+                                              p.shot_clot_twist * 8))))) \
+            * max(p.shot_clot_smooth, 1)
         ts = [clot * s / braid_n for s in range(braid_n)]
         # ts[braid_n] lands exactly on clot, where opened() is still 0
         ts += [clot + (1.0 - clot) * s / opened_n
@@ -1234,8 +1436,8 @@ def _build_shot(context, p, env_objs):
     # lashing and its own cross threads, from the emitter's location at the
     # moment it goes off, so a moving hand leaves a separate web behind
     # per shot rather than one fan smeared along its path.
-    for burst in range(max(p.shot_bursts, 1)):
-        b_start = float(p.shot_start) + burst * p.shot_burst_gap
+    for burst in range(n_bursts):
+        b_start = burst_start[burst]
         strands = []            # (vertex indices, arrival frames, angle)
 
         # This volley's target, cycling through the pool. One target per
@@ -1245,12 +1447,7 @@ def _build_shot(context, p, env_objs):
         # `bvh` is rebound here, not just read: outside() closes over it, so
         # lifting silk out of surfaces follows the same per-burst hit test
         # and stops shoving this volley's threads off a sibling target.
-        if aim_data:
-            aim, aim_surf, aim_now, aim_bvh = aim_data[burst % len(aim_data)]
-            bvh = aim_bvh if aim_bvh is not None else (
-                env[0] if env is not None else None)
-        else:
-            aim, aim_surf, aim_now = None, None, np.zeros(3)
+        aim, aim_surf, aim_now, bvh = hosts.burst(burst)
 
         # ---- pass 1: where every shot starts, aims and lands ---------
         fired = []
@@ -1259,9 +1456,11 @@ def _build_shot(context, p, env_objs):
             if p.shot_interval > 0.0:
                 fire += rnd.uniform(-0.35, 0.35) * p.shot_interval * p.jitter
                 fire = max(fire, b_start)   # never before the burst starts
-            muzzle = _obj_loc_at(emit, fire)
+            muzzle = hosts.loc(emit, fire)
             if muzzle is None:
                 muzzle = cursor
+            else:
+                emit_at[round(fire, 4)] = muzzle
 
             reach = p.shot_range
             if aim is not None:
@@ -1272,9 +1471,12 @@ def _build_shot(context, p, env_objs):
                 if aim_surf is not None:
                     pnt, _n = _sample_surface(rnd, aim_surf[1], aim_surf[2],
                                               aim_surf[3])
-                    tgt = pnt + (_obj_loc_at(aim, fire) - aim_now)
+                    # the surface was sampled at the volley's own frame, so
+                    # this delta is zero there and only carries the target
+                    # on through a burst that spans several frames
+                    tgt = pnt + (hosts.loc(aim, fire) - aim_now)
                 else:
-                    tgt = _obj_loc_at(aim, fire)
+                    tgt = hosts.loc(aim, fire)
                 d = tgt - muzzle
                 dl = float(np.linalg.norm(d))
                 axis = d / dl if dl > 1e-9 else _rand_unit(rnd)
@@ -1287,10 +1489,12 @@ def _build_shot(context, p, env_objs):
                 # at the far one.
                 over = 1.15 + min(max(p.shot_spread, 0.0), math.pi) * 0.25
                 reach = dl * over
-            elif axis0 is not None:
-                axis = axis0
             else:
-                axis = _rand_unit(rnd)   # no emitter, no target: spray outward
+                # no target: the emitter's own -Z at the moment it fires,
+                # so a hand that turns through a burst sprays with it
+                axis = hosts.axis(emit, fire)
+                if axis is None:
+                    axis = _rand_unit(rnd)   # no emitter either: spray out
             dirv = _cone_dir(rnd, axis, half)
 
             hit = (bvh.ray_cast(Vector(muzzle + dirv * 1e-4), Vector(dirv),
@@ -1357,6 +1561,10 @@ def _build_shot(context, p, env_objs):
         ts_all, clot_s = shot_samples(clot)
         nseg = len(ts_all) - 1
         open_s = min(nseg - 1, clot_s + 1)
+        # One "station" every `tie` points: the sampling Clot Smooth 1 would
+        # have produced. The lashing hangs off these, and so do the shortcut
+        # constraints below.
+        tie = max(p.shot_clot_smooth, 1)
 
         def opened(t):
             """0 while the shots are still balled together, easing to 1 (fully
@@ -1475,6 +1683,26 @@ def _build_shot(context, p, env_objs):
                         # anyway; it opens into strands, it does not fray.
                         # Same reasoning as the binder threads below.
                         binders.append((idx[-2], idx[-1]))
+            # Shortcut constraints across the braid: the coarse chain Clot
+            # Smooth 1 would have built, kept alongside the subdivided one.
+            #
+            # The solver relaxes positions, so a correction travels about one
+            # edge per iteration. Cutting the cord five times finer put five
+            # times as many edges between the muzzle and the tip, and with
+            # Iterations fixed the pull thinned out over that distance: the
+            # rope hung in a catenary at a Tension that used to hold it
+            # straight, and the whipping drooped off it in loops. These span
+            # `tie` points each, so tension crosses the cord in exactly the
+            # number of hops it did before the dial existed.
+            #
+            # They are geometry too, but they are chords across a few
+            # millimetres of a helix that is itself millimetres wide — they
+            # sit inside the cord, alongside the fibre they shadow, the same
+            # place the binder threads already live.
+            if tie > 1:
+                for s in range(0, clot_s, tie):
+                    segs.append([idx[s], idx[s + tie]])
+                    binders.append((idx[s], idx[s + tie]))
             # angle around the burst axis, so "neighbouring" strands are known
             # and ring threads can be strung between them
             e2 = np.cross(ax_c, up_c)
@@ -1563,7 +1791,12 @@ def _build_shot(context, p, env_objs):
                     if prev is not None:
                         segs.append([prev, vi])
                     prev = vi
-                    # bite onto the nearest fibre that tie is what binds
+                    # Bite onto the nearest fibre that tie is what binds.
+                    # Every second point, not every second station: this
+                    # thread hangs between its bites, and what it hangs by
+                    # is the number of edges in the gap, not their length.
+                    # Strided with Clot Smooth it drooped off the cord in
+                    # visible loops.
                     if s % 2 == 0:
                         best, bd = None, 1e18
                         for a in ring:
@@ -1585,7 +1818,7 @@ def _build_shot(context, p, env_objs):
                 b_i = ring[(pos + 1) % len(ring)]
                 if a == b_i:
                     continue
-                for s in range(1, clot_s + 1):
+                for s in range(tie, clot_s + 1, tie):
                     va, vb = strands[a][0][s], strands[b_i][0][s]
                     segs.append([va, vb])
                     binders.append((va, vb))
@@ -1598,7 +1831,7 @@ def _build_shot(context, p, env_objs):
             # (`opp`, not `half`: the spread half-angle above is still needed
             # by the next burst)
             opp = max(len(ring) // 2, 1)
-            for s in range(1, clot_s + 1):
+            for s in range(tie, clot_s + 1, tie):
                 for k in rnd.sample(range(len(ring)),
                                     min(len(ring), max(2, len(ring) // 3))):
                     a = ring[k]
@@ -1708,6 +1941,15 @@ def _build_shot(context, p, env_objs):
         me.attributes.new(A_EMIT, 'BOOLEAN', 'POINT').data.foreach_set(
             "value", marr)
         me[P_EMITTER] = emit.name
+        # Where the emitter stood when each volley went off, keyed by the
+        # fire frame those muzzles carry in A_SHOT. Baked here so the solver
+        # rides them on the offsets the web was actually built from — left
+        # to re-derive the emitter's animation itself it could only read
+        # location F-curves, and would drift on any rig, constraint or
+        # driver that this build resolved properly.
+        me[P_EMIT_AT] = json.dumps(
+            [[f] + [float(c) for c in emit_at[f]]
+             for f in sorted(emit_at)])
 
     # Everything inside the travelling clot: the binder threads, which are
     # only millimetres long, and the strand segments themselves, which the
