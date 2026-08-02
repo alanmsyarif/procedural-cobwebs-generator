@@ -467,7 +467,10 @@ def rest_slack(tension):
 
     Much gentler slope on that side: the slack rate would contract the web
     by a quarter and yank the anchors, where 2.0 is 15% pre-tension and
-    already rigid.
+    already rigid. 2.0 is where the slider stops but not the dial — the
+    range runs to 5.0 (60%) for a cord that has to hold a straight line
+    across a long span, since the residual droop grows with the span and
+    what looks rigid over a metre does not over ten.
 
     0.15 is deliberate, and was briefly dropped to 0.06 to stop web shots
     tearing. That was the wrong lever — the fragility was short clot

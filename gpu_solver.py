@@ -543,9 +543,14 @@ def _static_update(self, context):
 class ARN_GPUProps(PropertyGroup):
     enabled: BoolProperty(name="Enabled", default=False)
     tension: FloatProperty(
-        name="Tension", default=0.8, min=0.0, max=2.0,
+        name="Tension", default=0.8, min=0.0, max=5.0, soft_max=2.0,
         description="1 = taut threads, rest lengths exactly as built; "
-                    "lower = slack that droops into catenaries.")
+                    "lower = slack that droops into catenaries. Above 1 the "
+                    "threads are built short and pull permanently, 15% per "
+                    "unit — 2 is 15%, 5 is 60% and hauls on whatever the "
+                    "web is anchored to. Costs tear margin: tearing measures "
+                    "stretch against rest length and this shrinks it, so the "
+                    "panel below reports what the threshold is really worth.")
     resist_compression: BoolProperty(
         name="Resist Compression", default=False,
         description="Off = silk-like unilateral constraints (threads pull "

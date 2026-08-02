@@ -1,0 +1,72 @@
+{
+  ".claude/settings.local.json": {
+    "mtime": 1784978411.300227,
+    "ast_hash": "098d72863a6e4d405dce09199f0e3119",
+    "semantic_hash": "098d72863a6e4d405dce09199f0e3119"
+  },
+  "__init__.py": {
+    "mtime": 1784980758.252084,
+    "ast_hash": "aa87df8c0b4738d0c6c05412a4473dba",
+    "semantic_hash": "aa87df8c0b4738d0c6c05412a4473dba"
+  },
+  "constants.py": {
+    "mtime": 1784980758.2807028,
+    "ast_hash": "10ac6e0ed9fcb10ad668b0ef8f9bb6a7",
+    "semantic_hash": "10ac6e0ed9fcb10ad668b0ef8f9bb6a7"
+  },
+  "generator.py": {
+    "mtime": 1784980758.2847223,
+    "ast_hash": "8488f0e47e0d4a7cf9da3ed6316a0b07",
+    "semantic_hash": "8488f0e47e0d4a7cf9da3ed6316a0b07"
+  },
+  "gpu_native.py": {
+    "mtime": 1784980758.2733502,
+    "ast_hash": "24683285c5c27574e25b0214350e4702",
+    "semantic_hash": "24683285c5c27574e25b0214350e4702"
+  },
+  "gpu_solver.py": {
+    "mtime": 1784980758.2958016,
+    "ast_hash": "e8180411d855de7c3dca6aa8dd1ba855",
+    "semantic_hash": "e8180411d855de7c3dca6aa8dd1ba855"
+  },
+  "materials.py": {
+    "mtime": 1784980758.292495,
+    "ast_hash": "be8faae97486287f44695a333db2b969",
+    "semantic_hash": "be8faae97486287f44695a333db2b969"
+  },
+  "nodeutils.py": {
+    "mtime": 1784980758.2642267,
+    "ast_hash": "e28c8873b05b2142da6989764f01678e",
+    "semantic_hash": "e28c8873b05b2142da6989764f01678e"
+  },
+  "solver.py": {
+    "mtime": 1784980758.2786894,
+    "ast_hash": "92f03e171ee38c713a1a8d9dbf3f384f",
+    "semantic_hash": "92f03e171ee38c713a1a8d9dbf3f384f"
+  },
+  "strandify.py": {
+    "mtime": 1784980758.2978265,
+    "ast_hash": "0c45113c1213ea7dd2defd92d34120c9",
+    "semantic_hash": "0c45113c1213ea7dd2defd92d34120c9"
+  },
+  "ui.py": {
+    "mtime": 1784980758.2887335,
+    "ast_hash": "e1d1c42ba56d47781c92c21b456e0c86",
+    "semantic_hash": "e1d1c42ba56d47781c92c21b456e0c86"
+  },
+  "README.md": {
+    "mtime": 1784980758.2674868,
+    "ast_hash": "e69961f61ac007adf002a31f174d6b9b",
+    "semantic_hash": "e69961f61ac007adf002a31f174d6b9b"
+  },
+  "images/ss1.png": {
+    "mtime": 1784955241.7662368,
+    "ast_hash": "a827a6f69145bbab5b04705688112ab1",
+    "semantic_hash": "a827a6f69145bbab5b04705688112ab1"
+  },
+  "images/ss2.png": {
+    "mtime": 1784955241.7672656,
+    "ast_hash": "51aaf17281092e72d7dad00059cc0293",
+    "semantic_hash": "51aaf17281092e72d7dad00059cc0293"
+  }
+}

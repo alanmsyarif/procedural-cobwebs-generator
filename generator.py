@@ -259,6 +259,17 @@ class ARN_WebProps(PropertyGroup):
         description="Turns the strands braid around the clot's axis before "
                     "it opens. 0 = parallel cables, higher = a twisted, "
                     "knotted rope", update=_live_update)
+    shot_clot_smooth: IntProperty(
+        name="Clot Smooth", default=1, min=1, max=8,
+        description="Points per braid span in the travelling clot. The "
+                    "braid is eight points per turn of Clot Twist, which "
+                    "reads as a zigzag; this cuts each of those spans "
+                    "finer. Same idea as Strandify's Smooth Segments, but "
+                    "real geometry the GPU solver simulates it, and the "
+                    "extra points sit on the true helix rather than on an "
+                    "interpolation of the coarse one. Costs vertices: 8x "
+                    "here is 8x the clot's point count on every shot",
+        update=_live_update)
     # panel-only: no update hook, folding a section rebuilds nothing
     shot_advanced: BoolProperty(
         name="Advanced", default=False,
@@ -674,6 +685,35 @@ def _sample_surface(rnd, V, T, cum):
 def _rand_unit(rnd):
     v = np.array([rnd.gauss(0, 1), rnd.gauss(0, 1), rnd.gauss(0, 1)])
     return v / (np.linalg.norm(v) + 1e-12)
+
+
+def _buried(co, surf, nrm, dist, clear):
+    """Is `co` inside the surface whose nearest point is `surf`, or so close
+    to it that it should be nudged clear?
+
+    Nearest-surface hands back a face normal, and the obvious test — is the
+    offset behind it — is only meaningful when the nearest point lies in
+    that face's interior. When it lies on the face's *boundary* the plane
+    keeps going and the sign says nothing: a face plane extends past the
+    solid it belongs to, so a point metres away and a hair on the far side
+    of that plane read as "behind the face" exactly like a point buried in
+    the middle of the mesh. That is what put a single strand vertex, 4.5 m
+    short of the target and half a millimetre under the plane of its
+    bottom face, onto that face — one vertex out of a run of forty, with
+    two four-metre edges connecting it back to its neighbours.
+
+    Distance alone cannot separate the two either: a deeply buried point is
+    also far from the surface. The angle can. Inside the solid the surface
+    faces away from the point, so the offset runs roughly opposite the
+    normal; in the false case above it is very nearly tangential (cos was
+    -0.0001). Normalising turns a signed depth that scales with distance
+    into a direction test that does not."""
+    off = co - surf
+    if dist < clear:
+        # hugging the surface from either side, and `surf` is right there,
+        # so the lift is a nudge rather than a jump
+        return True
+    return float(np.dot(off, nrm)) / max(dist, 1e-12) < -0.5
 
 
 def _build_cobweb(context, p, env_objs):
@@ -1242,7 +1282,7 @@ def _build_shot(context, p, env_objs):
             return co
         surf = np.asarray(near[0], dtype=np.float64)
         nrm = np.asarray(near[1], dtype=np.float64)
-        if float(np.dot(co - surf, nrm)) < clear:
+        if _buried(co, surf, nrm, float(near[3]), clear):
             return surf + nrm * clear
         return co
 
@@ -1365,8 +1405,16 @@ def _build_shot(context, p, env_objs):
             opened_n = max(4, int(round(density)))
             return [s / opened_n for s in range(opened_n + 1)], 0
         opened_n = max(4, int(round((1.0 - clot) * density * FAN_BOOST)))
+        # Clot Smooth multiplies the braid's own count and nothing else. It
+        # is a subdivision of the spans that already exist, so clot_s still
+        # lands on `clot` exactly and every consumer that walks the clot by
+        # index (binders, the whipping ties, the neighbour lashing) follows
+        # the finer sampling without knowing about it. The cap applies
+        # before the multiply — 72 is where the braid stops gaining shape
+        # from Clot Twist alone; past that the points are the dial's job.
         braid_n = max(6, min(72, int(round(max(clot * density,
-                                              p.shot_clot_twist * 8)))))
+                                              p.shot_clot_twist * 8))))) \
+            * max(p.shot_clot_smooth, 1)
         ts = [clot * s / braid_n for s in range(braid_n)]
         # ts[braid_n] lands exactly on clot, where opened() is still 0
         ts += [clot + (1.0 - clot) * s / opened_n
@@ -1513,6 +1561,10 @@ def _build_shot(context, p, env_objs):
         ts_all, clot_s = shot_samples(clot)
         nseg = len(ts_all) - 1
         open_s = min(nseg - 1, clot_s + 1)
+        # One "station" every `tie` points: the sampling Clot Smooth 1 would
+        # have produced. The lashing hangs off these, and so do the shortcut
+        # constraints below.
+        tie = max(p.shot_clot_smooth, 1)
 
         def opened(t):
             """0 while the shots are still balled together, easing to 1 (fully
@@ -1631,6 +1683,26 @@ def _build_shot(context, p, env_objs):
                         # anyway; it opens into strands, it does not fray.
                         # Same reasoning as the binder threads below.
                         binders.append((idx[-2], idx[-1]))
+            # Shortcut constraints across the braid: the coarse chain Clot
+            # Smooth 1 would have built, kept alongside the subdivided one.
+            #
+            # The solver relaxes positions, so a correction travels about one
+            # edge per iteration. Cutting the cord five times finer put five
+            # times as many edges between the muzzle and the tip, and with
+            # Iterations fixed the pull thinned out over that distance: the
+            # rope hung in a catenary at a Tension that used to hold it
+            # straight, and the whipping drooped off it in loops. These span
+            # `tie` points each, so tension crosses the cord in exactly the
+            # number of hops it did before the dial existed.
+            #
+            # They are geometry too, but they are chords across a few
+            # millimetres of a helix that is itself millimetres wide — they
+            # sit inside the cord, alongside the fibre they shadow, the same
+            # place the binder threads already live.
+            if tie > 1:
+                for s in range(0, clot_s, tie):
+                    segs.append([idx[s], idx[s + tie]])
+                    binders.append((idx[s], idx[s + tie]))
             # angle around the burst axis, so "neighbouring" strands are known
             # and ring threads can be strung between them
             e2 = np.cross(ax_c, up_c)
@@ -1719,7 +1791,12 @@ def _build_shot(context, p, env_objs):
                     if prev is not None:
                         segs.append([prev, vi])
                     prev = vi
-                    # bite onto the nearest fibre that tie is what binds
+                    # Bite onto the nearest fibre that tie is what binds.
+                    # Every second point, not every second station: this
+                    # thread hangs between its bites, and what it hangs by
+                    # is the number of edges in the gap, not their length.
+                    # Strided with Clot Smooth it drooped off the cord in
+                    # visible loops.
                     if s % 2 == 0:
                         best, bd = None, 1e18
                         for a in ring:
@@ -1741,7 +1818,7 @@ def _build_shot(context, p, env_objs):
                 b_i = ring[(pos + 1) % len(ring)]
                 if a == b_i:
                     continue
-                for s in range(1, clot_s + 1):
+                for s in range(tie, clot_s + 1, tie):
                     va, vb = strands[a][0][s], strands[b_i][0][s]
                     segs.append([va, vb])
                     binders.append((va, vb))
@@ -1754,7 +1831,7 @@ def _build_shot(context, p, env_objs):
             # (`opp`, not `half`: the spread half-angle above is still needed
             # by the next burst)
             opp = max(len(ring) // 2, 1)
-            for s in range(1, clot_s + 1):
+            for s in range(tie, clot_s + 1, tie):
                 for k in rnd.sample(range(len(ring)),
                                     min(len(ring), max(2, len(ring) // 3))):
                     a = ring[k]
