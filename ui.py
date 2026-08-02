@@ -429,6 +429,24 @@ class ARN_PT_main(Panel):
                     warn.label(text="Tears at %.2fx built, not %.2fx"
                                     % (g.tear_threshold * slack,
                                        g.tear_threshold))
+                    # Past the threshold the web does not tear "easily", it
+                    # is already torn before the first step runs: every edge
+                    # is over the limit at its built length, so the whole
+                    # thing comes apart into straight free-flying pieces and
+                    # reads as a bug rather than a setting. Tension can reach
+                    # here on its own now that the dial goes to 5.
+                    if margin <= 1.0:
+                        # the Tension that lands exactly on the threshold.
+                        # Rate read back out of rest_slack rather than
+                        # written down again, so the two cannot disagree
+                        rate = 1.0 - rest_slack(2.0)
+                        warn.label(text="Every thread tears on frame 1",
+                                   icon='ERROR')
+                        warn.label(text="Tension under %.2f, or raise "
+                                        "Tear Threshold over %.2f"
+                                        % (1.0 + (1.0 - 1.0
+                                                  / g.tear_threshold) / rate,
+                                           start))
             col.separator()
             row = col.row(align=True)
             row.operator("arachne.reset_gpu", icon='FILE_REFRESH')

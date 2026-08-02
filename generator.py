@@ -342,9 +342,15 @@ class ARN_WebProps(PropertyGroup):
         description="Slack chaotic threads drooping across the web",
         update=_live_update)
     detail: IntProperty(
-        name="Detail", default=2, min=1, max=5,
+        name="Detail", default=2, min=1, max=12, soft_max=5,
         description="Sub-points per thread span (sag resolution for the "
-                    "solver and the scallops).",
+                    "solver and the scallops). Web Shot spends it per unit "
+                    "of flight, so long shots need more of it than short "
+                    "ones — at 5 a six-metre strand is 30 segments and the "
+                    "curve of its flight reads as straight facets. Costs "
+                    "tear margin as well as vertices: tearing measures "
+                    "strain against segment length, so finer segments tear "
+                    "on less movement.",
         update=_live_update)
     anchors: IntProperty(
         name="Anchor Threads", default=5, min=1, max=16,
