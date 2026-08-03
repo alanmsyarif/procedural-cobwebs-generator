@@ -8,29 +8,16 @@ Minimum Blender 5.2 LTS.
 
 ## Install
 
-1. Download `arachne.zip` from Releases.
+1. Download the zip — either a Releases asset or **Code → Download ZIP**.
 2. Edit → Preferences → Add-ons → Install from Disk.
 3. Enable **Arachne**. Panel appears in the 3D View sidebar (`N`).
 
-> Use the `arachne.zip` release asset, not GitHub's green **Code → Download
-> ZIP** button. That one wraps the files in a folder named after the repo and
-> tag, e.g. `procedural-cobwebs-generator-4.3.0`, and Blender fails with
-> `No module named 'procedural-cobwebs-generator-4'` — hyphens and dots are
-> illegal in a Python module name.
+Arachne installs as a Blender extension. `blender_manifest.toml` pins the
+module name to `arachne`, so whatever the zip happens to be called makes no
+difference.
 
-## Building the zip
-
-Arachne is a script add-on, so the zip must hold exactly one top-level
-folder named `arachne` — that folder name becomes the Python module name
-Blender imports.
-
-```sh
-git archive --prefix=arachne/ -o arachne.zip HEAD \
-  ':!images' ':!test_shot.py' ':!.claude'
-```
-
-Run it in the repo root. Archives the current commit, so commit before
-building. `.git` is left out automatically.
+To uninstall, use the `v` menu at the right-hand end of the Arachne row in
+the Add-ons list. Extensions keep it there rather than on an inline button.
 
 ## Quick start
 
