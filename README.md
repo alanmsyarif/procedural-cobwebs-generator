@@ -26,11 +26,15 @@ Blender imports.
 
 ```sh
 git archive --prefix=arachne/ -o arachne.zip HEAD \
-  ':!images' ':!test_shot.py' ':!.claude'
+  ':!images' ':!test_shot.py' ':!.claude' ':!.github'
 ```
 
 Run it in the repo root. Archives the current commit, so commit before
 building. `.git` is left out automatically.
+
+Publishing a release runs the same command in CI
+(`.github/workflows/release-zip.yml`) and attaches `arachne.zip` to it, so the
+Releases page always carries an installable zip.
 
 ## Quick start
 

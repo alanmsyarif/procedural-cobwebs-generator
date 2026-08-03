@@ -1,0 +1,46 @@
+# Attaches a correctly-named arachne.zip to every published release.
+#
+# Arachne is a legacy script add-on, so Blender takes the Python module name
+# straight from the zip's top-level folder. GitHub's own source zip is named
+# after the repo and tag (procedural-cobwebs-generator-4.3.0), which is not a
+# valid module name, and installing it fails with
+# "No module named 'procedural-cobwebs-generator-4'". --prefix=arachne/ is the
+# fix: one clean top-level folder, whatever the repo or tag is called.
+
+name: Release zip
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  zip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build arachne.zip
+        run: |
+          git archive --prefix=arachne/ -o arachne.zip HEAD \
+            ':!images' ':!test_shot.py' ':!.claude' ':!.github'
+          # The whole point of this workflow — refuse to ship a zip that
+          # would not import.
+          test "$(zipinfo -1 arachne.zip | cut -d/ -f1 | sort -u)" = "arachne"
+          zipinfo -1 arachne.zip
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" arachne.zip --clobber
+
+      - name: Upload as artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: arachne-zip
+          path: arachne.zip
