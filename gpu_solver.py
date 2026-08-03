@@ -98,7 +98,7 @@ def _drop_all_states():
 #
 # Two consequences worth knowing. The field is set from a frame-change
 # handler, which runs after the depsgraph has already evaluated Bullet for
-# that frame, so the pull lands one frame later — invisible in motion, but
+# that frame, so the pull lands one frame later invisible in motion, but
 # it is why this wants playing forward from frame 1 rather than scrubbing.
 # And Bullet only simulates onto frames its point cache has not reached, so
 # a stale rigid body cache means the object will not budge; the setup
