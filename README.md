@@ -11,7 +11,6 @@ Minimum Blender 5.2 LTS.
 1. Download the zip — either a Releases asset or **Code → Download ZIP**.
 2. Edit → Preferences → Add-ons → Install from Disk.
 3. Enable **Arachne**. Panel appears in the 3D View sidebar (`N`).
-4. 
 ## Quick start
 
 1. *(Optional)* Select a mesh, the collider, or in Chaotic Cobweb mode the
