@@ -20,13 +20,17 @@ Minimum Blender 5.2 LTS.
 
 ## Building the zip
 
+Arachne is a script add-on, so the zip must hold exactly one top-level
+folder named `arachne` — that folder name becomes the Python module name
+Blender imports.
+
 ```sh
-blender --command extension build
+git archive --prefix=arachne/ -o arachne.zip HEAD \
+  ':!images' ':!test_shot.py' ':!.claude'
 ```
 
-Run it in the repo root. It reads `blender_manifest.toml`, honours the
-`paths_exclude_pattern` list there and writes `arachne-4.3.0.zip`, which
-installs regardless of what the file on disk is called.
+Run it in the repo root. Archives the current commit, so commit before
+building. `.git` is left out automatically.
 
 ## Quick start
 
