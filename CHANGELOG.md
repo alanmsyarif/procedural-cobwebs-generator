@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.3.1
+
+Install fix only, no behaviour changes.
+
+- **Installs as a Blender extension.** Arachne was a legacy script add-on, so
+  Blender took the Python module name from the zip's top-level folder.
+  GitHub's source zip is named after the repo and tag, e.g.
+  `procedural-cobwebs-generator-4.3.0`, which is not a valid module name, and
+  installing it failed with
+  `No module named 'procedural-cobwebs-generator-4'`. `blender_manifest.toml`
+  pins the module name to `arachne`, so any zip installs.
+- **Uninstall moved.** Extensions put it in the `v` menu at the right-hand
+  end of the add-on's row, not on an inline button.
+- **Handler cleanup matched too broadly.** As an extension `__package__` is
+  `bl_ext.<repo>.arachne`, and only the first component was compared, so
+  disabling Arachne could strip other extensions' frame handlers.
+
 ## 4.0.0
 
 First release since 3.2.3. Web Shot is now the default mode and got most of
