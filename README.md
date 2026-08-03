@@ -11,14 +11,7 @@ Minimum Blender 5.2 LTS.
 1. Download the zip — either a Releases asset or **Code → Download ZIP**.
 2. Edit → Preferences → Add-ons → Install from Disk.
 3. Enable **Arachne**. Panel appears in the 3D View sidebar (`N`).
-
-Arachne installs as a Blender extension. `blender_manifest.toml` pins the
-module name to `arachne`, so whatever the zip happens to be called makes no
-difference.
-
-To uninstall, use the `v` menu at the right-hand end of the Arachne row in
-the Add-ons list. Extensions keep it there rather than on an inline button.
-
+4. 
 ## Quick start
 
 1. *(Optional)* Select a mesh, the collider, or in Chaotic Cobweb mode the
@@ -31,10 +24,10 @@ vertices → **Pin / Unpin**.
 
 ## Web types
 
-**Orb Web** — classic radial/spiral web. Scalloped sag, uneven spiral
+**Orb Web** classic radial/spiral web. Scalloped sag, uneven spiral
 spacing, damage gaps, asymmetry, wavy radials, tangle threads.
 
-**Chaotic Cobweb** — spider-spun 3D webbing anchored to your scene
+**Chaotic Cobweb** spider-spun 3D webbing anchored to your scene
 geometry (Pixar *Toy Story 4* construction). Select a corner, prop or room
 and simulated spiders spin between the surfaces.
 
