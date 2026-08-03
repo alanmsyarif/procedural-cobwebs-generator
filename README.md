@@ -70,7 +70,7 @@ before it flies.
 
 **Animated emitters and targets.** Reading location F-curves only sees a
 plain keyframe, so the build steps the scene to each volley's own frame and
-reads the transforms — and the target's collision geometry — off the
+reads the transforms — and the target's collision geometry off the
 evaluated depsgraph instead. Parenting to a rig or a bone, constraints, NLA
 strips and drivers all work. A setup with nothing animated never sets a
 frame and costs exactly what it did before.
@@ -85,7 +85,7 @@ meshes for a Chaotic Cobweb move or scale a wall and the web re-spins onto
 it, staying stuck to the corner instead of hanging in space.
 
 Only a drag counts. Playing back or scrubbing moves an animated emitter on
-every frame, and rebuilding there would be wasted work — the build reads the
+every frame, and rebuilding there would be wasted work the build reads the
 animation at the frames the volleys fire on, so the web is the same one
 whatever frame you are parked on.
 
@@ -198,6 +198,7 @@ its own disk bake. The bake fills both.
 - No self-collision between threads.
 - SDF collision approximates rigid colliders; deforming meshes fall back to
   the bounded shape at bake time.
+- Disable Persistent data in render, so the simulation doesn't stop
 
 ## Credits
 
