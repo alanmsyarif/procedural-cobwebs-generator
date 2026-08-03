@@ -13,7 +13,7 @@
 #  > "Generate Web" -> "Add GPU Solver" -> "Add Strandify" -> play from
 #  frame 1.
 #
-#  Blender 4.2+ / 5.x.
+#  Blender 5.2 LTS or newer.
 # ============================================================================
 
 # Keep `version` and constants.BUILD in step — the first is what Blender's
@@ -23,7 +23,7 @@ bl_info = {
     "name": "Arachne",
     "author": "Amsy",
     "version": (4, 3, 0),
-    "blender": (4, 2, 0),
+    "blender": (5, 2, 0),
     "location": "View3D > Sidebar (N) > Arachne",
     "description": "Procedural webs with a native-GPU tearing solver, "
                    "natural-silk or synthetic web-fluid strandify and "

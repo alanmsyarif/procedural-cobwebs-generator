@@ -12,6 +12,22 @@ Minimum Blender 5.2 LTS.
 2. Edit → Preferences → Add-ons → Install from Disk.
 3. Enable **Arachne**. Panel appears in the 3D View sidebar (`N`).
 
+> Use the `arachne.zip` release asset, not GitHub's green **Code → Download
+> ZIP** button. That one wraps the files in a folder named after the repo and
+> tag, e.g. `procedural-cobwebs-generator-4.3.0`, and Blender fails with
+> `No module named 'procedural-cobwebs-generator-4'` — hyphens and dots are
+> illegal in a Python module name.
+
+## Building the zip
+
+```sh
+blender --command extension build
+```
+
+Run it in the repo root. It reads `blender_manifest.toml`, honours the
+`paths_exclude_pattern` list there and writes `arachne-4.3.0.zip`, which
+installs regardless of what the file on disk is called.
+
 ## Quick start
 
 1. *(Optional)* Select a mesh, the collider, or in Chaotic Cobweb mode the

@@ -845,8 +845,11 @@ def _install_handlers():
 
 def _remove_handlers():
     # match on this add-on's own package name so renaming the installed
-    # folder never orphans handlers (which would double up on re-enable)
-    root = (__package__ or __name__).split(".")[0]
+    # folder never orphans handlers (which would double up on re-enable).
+    # Use the whole package: installed as an extension it is
+    # `bl_ext.<repo>.arachne`, and taking only the first component would
+    # match `bl_ext` — i.e. every other extension's handlers too.
+    root = __package__ or __name__
     for list_name, fn in _HANDLERS:
         handlers = getattr(bpy.app.handlers, list_name)
         for h in [h for h in handlers
