@@ -35,6 +35,7 @@
 
 import json
 import random
+import re
 import traceback
 
 import numpy as np
@@ -360,6 +361,20 @@ void main() {
 _PUSH_NAMES = ("p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8")
 
 
+def _push_names(source):
+    """Which of p1..p8 a kernel actually reads.
+
+    On the Vulkan backend push constants live in one block, so every name
+    resolves whether the kernel mentions it or not. The OpenGL backend
+    compiles them to plain uniforms instead, and the GLSL compiler drops
+    any the kernel never reads, and setting one then raises "uniform pN
+    not found". Only _SOLVE uses all eight, so the shared push has to know
+    what each kernel wants. Comments go first: a name surviving only in a
+    comment is not a reference, and the compiler would strip it."""
+    code = re.sub(r"/\*.*?\*/|//[^\n]*", " ", source, flags=re.S)
+    return tuple(n for n in _PUSH_NAMES if re.search(r"\b%s\b" % n, code))
+
+
 # ---------------------------------------------------------------------------
 #  Texture helpers
 # ---------------------------------------------------------------------------
@@ -399,7 +414,7 @@ def _shader(gpu, source, images, n, m, sdf_res):
     info.define("R_SDF", str(max(sdf_res, 1)))
     for slot, (fmt, ttype, name) in enumerate(images):
         info.image(slot, fmt, ttype, name, qualifiers={"READ", "WRITE"})
-    for pname in _PUSH_NAMES:
+    for pname in _push_names(source):
         info.push_constant('VEC4', pname)
     info.local_group_size(8, 8)
     info.compute_source(source)
@@ -794,34 +809,42 @@ class NativeState:
         self._dummy3d = _tex3d(gpu, 1, np.full((1, 1, 1), 1e3, np.float32))
 
         pt = 'FLOAT_2D'
-        self.sh_int = _shader(gpu, _INTEGRATE,
-                              [('RGBA32F', pt, 'posA'),
-                               ('RGBA32F', pt, 'prevI')], n, m, sdf_res)
-        self.sh_solve = _shader(gpu, _SOLVE,
-                                [('RGBA32F', pt, 'posIn'),
-                                 ('RGBA32F', pt, 'posOut'),
-                                 ('RGBA32F', pt, 'prevI'),
-                                 ('RGBA32F', pt, 'edges'),
-                                 ('RG32F', pt, 'incOff'),
-                                 ('R32F', pt, 'incLst'),
-                                 ('R32F', 'FLOAT_3D', 'sdf')],
-                                n, m, sdf_res)
-        self.sh_follow = _shader(gpu, _FOLLOW,
-                                 [('RGBA32F', pt, 'posA'),
-                                  ('RGBA32F', pt, 'prevI')], n, m, sdf_res)
-        self.sh_anchor = _shader(gpu, _ANCHOR,
-                                 [('RGBA32F', pt, 'posA'),
-                                  ('RGBA32F', pt, 'prevI'),
-                                  ('RGBA32F', pt, 'base')], n, m, sdf_res)
-        self.sh_tear = _shader(gpu, _TEAR,
-                               [('RGBA32F', pt, 'posA'),
-                                ('RGBA32F', pt, 'edges')], n, m, sdf_res)
-        self.sh_tens = _shader(gpu, _TENSION,
-                               [('RGBA32F', pt, 'posA'),
-                                ('RGBA32F', pt, 'edges'),
-                                ('RG32F', pt, 'incOff'),
-                                ('R32F', pt, 'incLst'),
-                                ('R32F', pt, 'tens')], n, m, sdf_res)
+        # _push() feeds every kernel from one set of values, so it has to
+        # know which names each one compiled with (see _push_names)
+        self._pn = {}
+
+        def mk(source, images):
+            sh = _shader(gpu, source, images, n, m, sdf_res)
+            self._pn[sh] = _push_names(source)
+            return sh
+
+        self.sh_int = mk(_INTEGRATE,
+                         [('RGBA32F', pt, 'posA'),
+                          ('RGBA32F', pt, 'prevI')])
+        self.sh_solve = mk(_SOLVE,
+                           [('RGBA32F', pt, 'posIn'),
+                            ('RGBA32F', pt, 'posOut'),
+                            ('RGBA32F', pt, 'prevI'),
+                            ('RGBA32F', pt, 'edges'),
+                            ('RG32F', pt, 'incOff'),
+                            ('R32F', pt, 'incLst'),
+                            ('R32F', 'FLOAT_3D', 'sdf')])
+        self.sh_follow = mk(_FOLLOW,
+                            [('RGBA32F', pt, 'posA'),
+                             ('RGBA32F', pt, 'prevI')])
+        self.sh_anchor = mk(_ANCHOR,
+                            [('RGBA32F', pt, 'posA'),
+                             ('RGBA32F', pt, 'prevI'),
+                             ('RGBA32F', pt, 'base')])
+        self.sh_tear = mk(_TEAR,
+                          [('RGBA32F', pt, 'posA'),
+                           ('RGBA32F', pt, 'edges')])
+        self.sh_tens = mk(_TENSION,
+                          [('RGBA32F', pt, 'posA'),
+                           ('RGBA32F', pt, 'edges'),
+                           ('RG32F', pt, 'incOff'),
+                           ('R32F', pt, 'incLst'),
+                           ('R32F', pt, 'tens')])
 
     # -- dispatch helpers ---------------------------------------------------
     def _groups(self, count):
@@ -830,21 +853,22 @@ class NativeState:
 
     def _push(self, sh, g, dt2, t_now, g_loc, w_loc, sphere,
               sdf_on, sdf_delta, sdf_bmin, sdf_inv):
-        sh.uniform_float("p1", (dt2, g.damping, g.turbulence, t_now))
-        sh.uniform_float("p2", (g_loc[0], g_loc[1], g_loc[2], sdf_delta[2]))
-        sh.uniform_float("p3", (w_loc[0], w_loc[1], w_loc[2],
-                                1.0 + g.stiffness))
-        sh.uniform_float("p4", sphere)
-        sh.uniform_float("p5", (g.collision_offset, g.friction,
-                                g.tear_threshold,
-                                1.0 if g.enable_tearing else 0.0))
-        sh.uniform_float("p6", (1.0 if g.resist_compression else 0.0,
-                                sdf_on, g.stickiness,
-                                2.0 if self.latch else 1.0))
-        sh.uniform_float("p7", (sdf_bmin[0], sdf_bmin[1], sdf_bmin[2],
-                                sdf_delta[0]))
-        sh.uniform_float("p8", (sdf_inv[0], sdf_inv[1], sdf_inv[2],
-                                sdf_delta[1]))
+        vals = {
+            "p1": (dt2, g.damping, g.turbulence, t_now),
+            "p2": (g_loc[0], g_loc[1], g_loc[2], sdf_delta[2]),
+            "p3": (w_loc[0], w_loc[1], w_loc[2], 1.0 + g.stiffness),
+            "p4": sphere,
+            "p5": (g.collision_offset, g.friction, g.tear_threshold,
+                   1.0 if g.enable_tearing else 0.0),
+            "p6": (1.0 if g.resist_compression else 0.0, sdf_on,
+                   g.stickiness, 2.0 if self.latch else 1.0),
+            "p7": (sdf_bmin[0], sdf_bmin[1], sdf_bmin[2], sdf_delta[0]),
+            "p8": (sdf_inv[0], sdf_inv[1], sdf_inv[2], sdf_delta[1]),
+        }
+        # only what this kernel compiled with; the rest are not there to
+        # set on the OpenGL backend
+        for name in self._pn[sh]:
+            sh.uniform_float(name, vals[name])
 
     def hosts_moved(self):
         """Has anything the anchors are stuck to moved since the last

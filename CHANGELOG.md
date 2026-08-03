@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.3.2
+
+- **Solver no longer dies on the OpenGL backend.** The shared uniform push
+  fed all eight push constants to every kernel, but only the main solve
+  kernel reads all eight. Vulkan keeps the whole push-constant block, so
+  the extra names resolve there and nothing shows. OpenGL compiles push
+  constants to plain uniforms and the GLSL compiler drops any the kernel
+  never reads, so the first unused one raised
+  `ValueError: GPUShader.uniform_float: uniform p4 not found` and the
+  backend disabled itself. Each kernel is now pushed only the constants it
+  compiled with. Vertex positions are identical on both backends.
+
 ## 4.3.1
 
 Install fix only, no behaviour changes.
