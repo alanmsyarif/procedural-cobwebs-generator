@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
-# `id` is the module name Blender imports the add-on under, so it — not the
-# name of the folder or zip on disk — decides whether the import succeeds.
+# `id` is the module name Blender imports the add-on under, so it not the
+# name of the folder or zip on disk decides whether the import succeeds.
 # Keep it a bare lowercase Python identifier: no hyphens, no dots.
 id = "arachne"
 name = "Arachne"
