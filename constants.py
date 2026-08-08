@@ -4,7 +4,7 @@
 # version in __init__.py. Blender caches imported modules, so copying new
 # files into the addons folder changes nothing until scripts are reloaded —
 # the panel showing an older build than the Add-ons list is how that shows.
-BUILD = "4.3.2 animated emitter"
+BUILD = "4.4.0 bake for render"
 
 #
 # NOTE: the `swf_` prefix on attributes and custom properties below is
@@ -17,6 +17,12 @@ BUILD = "4.3.2 animated emitter"
 GROUP_SOLVER    = "Arachne Tearing Solver"
 GROUP_STRANDIFY = "Arachne Strandify"
 GROUP_GPU_APPLY = "Arachne GPU Apply"
+
+# The baked variant of the apply group (see gpu_solver). Deliberately a
+# suffix of GROUP_GPU_APPLY: every lookup of the apply modifier matches on
+# that prefix, so a baked web is still "the web with an apply modifier" to
+# the rest of the add-on.
+GROUP_BAKE_APPLY = GROUP_GPU_APPLY + " Bake"
 
 MAT_SILK    = "Arachne Silk"
 MAT_DEW     = "Arachne Dew"
@@ -33,6 +39,12 @@ A_TENS_E = "swf_tens_edge"  # EDGE  float  — normalized stretch (0=rest, 1=tea
 A_TENSION = "swf_tension"   # POINT float  — edge tension averaged to points
 A_GPU_POS = "swf_gpu_pos"   # POINT vector — GPU solver positions writeback
 A_BROKEN  = "swf_broken"    # EDGE  bool   — GPU solver torn-edge mask
+A_BREAK_F = "swf_break_f"   # EDGE  float  — first frame this edge tore, or
+                            #                BAKE_NEVER. Tearing is one-way
+                            #                (the tear kernel skips an edge
+                            #                already torn), so one frame
+                            #                number per edge replaces a
+                            #                per-frame broken-edge cache.
 A_NOTEAR  = "swf_notear"    # EDGE  bool   — edge the solver must never tear
 A_SHOT    = "swf_shot_t"    # POINT float  — frame the flying tip reaches
                             #                this point (web shot reveal)
@@ -49,6 +61,15 @@ P_EMITTER = "swf_emitter"
 # emitter's position itself (see gpu_native._anchor_base).
 P_EMIT_AT = "swf_emit_at"
 
+
+# Baked web sim. The cache is a plain mesh of frames x vertices loose
+# vertices, sampled per frame by the baked apply group. Loose vertices are
+# not renderable geometry, so the cache object never shows up in a render.
+P_BAKE_CACHE = "swf_bake_cache"   # object prop: name of that cache object
+P_BAKE_START = "swf_bake_start"   # object prop: first baked frame
+P_BAKE_END   = "swf_bake_end"     # object prop: last baked frame
+BAKE_CACHE   = "Arachne Bake %s"  # cache object name, formatted with the web
+BAKE_NEVER   = 1.0e9              # A_BREAK_F value for an edge that held
 # Object custom property: name of the wind-field empty that feeds the web's
 # pull into Blender's rigid body sim (see gpu_solver's pull field).
 P_PULL = "swf_pull_field"

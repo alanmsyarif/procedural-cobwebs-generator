@@ -17,10 +17,11 @@ from bpy.props import (
 from bpy.types import Operator, PropertyGroup
 
 from .constants import (
-    GROUP_GPU_APPLY, A_PIN, A_SHOT, A_GPU_POS, A_BROKEN, A_TENSION,
-    P_PULL, PULL_FIELD,
+    GROUP_GPU_APPLY, GROUP_BAKE_APPLY, A_PIN, A_SHOT, A_GPU_POS, A_BROKEN,
+    A_TENSION, A_BREAK_F, P_PULL, PULL_FIELD,
+    P_BAKE_CACHE, P_BAKE_START, P_BAKE_END, BAKE_CACHE, BAKE_NEVER,
 )
-from .nodeutils import H
+from .nodeutils import H, set_modifier_input
 
 _STATES = {}
 
@@ -66,6 +67,10 @@ def _ensure_attr(me, name, dtype, domain):
 _CACHE = {}   # obj name -> {frame: (pos, broken, tension) float32/bool}
 _RENDERING = False
 _RENDER_WARNED = False
+# True while ARN_OT_bake_web is stepping the scene. Its own frame_set calls
+# are the bake, not a user edit, so the depsgraph tick each one causes must
+# not be read as one (and must not restart the sim it is recording).
+_BAKING = False
 
 
 def _cache_store(obj, frame, arrays):
@@ -186,11 +191,18 @@ def _cache_apply(obj, frame):
 def _on_render_begin(scene, depsgraph=None):
     global _RENDERING, _RENDER_WARNED
     _RENDERING = True
-    if not _RENDER_WARNED:
+    # only worth saying for a web still on the live solver: a baked one is
+    # played back by the node tree, needs no handler and no cache, and
+    # telling its owner to go and fill one would send them backwards
+    live = [o for o in scene.objects
+            if getattr(o, "swf_gpu", None) is not None and o.swf_gpu.enabled]
+    if live and not _RENDER_WARNED:
         _RENDER_WARNED = True
-        print("Arachne: render detected — replaying the cached web sim (GPU "
-              "compute can't run on the render thread). Play through the "
-              "frame range once in the viewport to fill the cache.")
+        print("Arachne: rendering %d web(s) on the live solver. GPU compute "
+              "cannot run on the render thread, so this replays whatever the "
+              "viewport cache holds and drops the rest. Use Bake Web for "
+              "Render for a render that matches the viewport."
+              % len(live))
 
 
 @persistent
@@ -357,7 +369,7 @@ def _on_depsgraph(scene, depsgraph=None):
     global _IN_DEPSGRAPH
     # our own attribute writes tag the mesh, which lands us straight back
     # here — and rebuilding a web tags plenty more
-    if _IN_DEPSGRAPH or _render_active():
+    if _IN_DEPSGRAPH or _BAKING or _render_active():
         return
     from . import gpu_native
     if gpu_native.native_broken():
@@ -455,6 +467,149 @@ def _ensure_apply_group():
     return nt
 
 
+# ---------------------------------------------------------------------------
+#  Baked apply group (pure GN playback of a bake — no handler, no GPU)
+# ---------------------------------------------------------------------------
+#
+# The live group above only shows anything because a frame-change handler
+# keeps rewriting A_GPU_POS. That handler needs the main thread and a live
+# GPU context, which rules out renders (render thread, no context) and every
+# exporter that drives frames through its own loop instead of the animation
+# player -- Alembic and USD both do, and neither fires frame-change
+# handlers at all, so they see one frozen pose repeated on every frame.
+#
+# This group reads the bake instead, entirely inside the node tree:
+#
+#   row   = clamp(Scene Time, Start, End) - Start
+#   index = row * Verts + Index          -> Sample Index on the cache mesh
+#
+# Geometry Nodes is evaluated by the depsgraph, so this is correct wherever
+# the depsgraph is: viewport, render thread, and inside an exporter's frame
+# loop. Torn edges come from A_BREAK_F on the web itself -- one frame number
+# per edge, since the tear kernel never un-tears one.
+
+BAKE_APPLY_VERSION = 1
+
+
+def _build_bake_group():
+    from .nodeutils import sock_in
+    nt = bpy.data.node_groups.new(GROUP_BAKE_APPLY, "GeometryNodeTree")
+    nt.interface.new_socket(name="Geometry", in_out='INPUT',
+                            socket_type='NodeSocketGeometry')
+    sock_in(nt.interface, "Cache", 'NodeSocketObject')
+    sock_in(nt.interface, "Start", 'NodeSocketInt', 1)
+    sock_in(nt.interface, "End", 'NodeSocketInt', 250)
+    sock_in(nt.interface, "Verts", 'NodeSocketInt', 0)
+    nt.interface.new_socket(name="Geometry", in_out='OUTPUT',
+                            socket_type='NodeSocketGeometry')
+    h = H(nt)
+    gi = h.n("NodeGroupInput", -1150, 0)
+    go = h.n("NodeGroupOutput", 900, 0)
+
+    # -- which row of the cache this frame reads ---------------------------
+    # Held, not wrapped, outside the baked range: a web parked past the end
+    # should stay where the bake left it rather than snap back to frame one.
+    stime = h.n("GeometryNodeInputSceneTime", -1150, -560)
+    fi = h.n("FunctionNodeFloatToInt", -980, -560, rounding_mode='FLOOR')
+    h.lk(stime.outputs["Frame"], fi.inputs[0])
+    lo = h.imath('MAXIMUM', -820, -560, fi.outputs["Integer"],
+                 gi.outputs["Start"])
+    hi = h.imath('MINIMUM', -660, -560, lo.outputs["Value"],
+                 gi.outputs["End"])
+    row = h.imath('SUBTRACT', -500, -560, hi.outputs["Value"],
+                  gi.outputs["Start"])
+    vidx = h.n("GeometryNodeInputIndex", -500, -700)
+    cell = h.imath('MULTIPLY_ADD', -340, -620, row.outputs["Value"],
+                   gi.outputs["Verts"], vidx.outputs["Index"],
+                   label="cache row * verts + index")
+
+    # -- read that row ----------------------------------------------------
+    oi = h.n("GeometryNodeObjectInfo", -820, -280,
+             transform_space='ORIGINAL')
+    h.lk(gi.outputs["Cache"], oi.inputs["Object"])
+    cpos = h.n("GeometryNodeInputPosition", -820, -400)
+    s_pos = h.sample('FLOAT_VECTOR', 'POINT', -160, -280,
+                     oi.outputs["Geometry"], cpos.outputs["Position"],
+                     cell.outputs["Value"], label="baked position")
+    ctens = h.named('FLOAT', A_TENSION, -820, -470)
+    s_ten = h.sample('FLOAT', 'POINT', -160, -470,
+                     oi.outputs["Geometry"], ctens.outputs["Attribute"],
+                     cell.outputs["Value"], label="baked tension")
+
+    # -- apply ------------------------------------------------------------
+    # Everything indexed off the cache happens before the first deletion:
+    # dropping a point renumbers the rest, and the row arithmetic above is
+    # built on the vertex order the bake was recorded in.
+    sp = h.n("GeometryNodeSetPosition", 100, 0, label="baked positions")
+    h.lk(gi.outputs["Geometry"], sp.inputs["Geometry"])
+    h.lk(s_pos.outputs["Value"], sp.inputs["Position"])
+    st = h.store('FLOAT', 'POINT', A_TENSION, 280, 0,
+                 geo=sp.outputs["Geometry"], value=s_ten.outputs["Value"])
+
+    # Web Shot reveal, same rule as the live group
+    shot_t = h.named('FLOAT', A_SHOT, 280, -300)
+    unborn = h.cmp('FLOAT', 'GREATER_THAN', 430, -300,
+                   shot_t.outputs["Attribute"], stime.outputs["Frame"],
+                   label="not fired yet")
+    reveal = h.n("GeometryNodeDeleteGeometry", 460, 0, label="shot reveal",
+                 domain='POINT', mode='ALL')
+    h.lk(st.outputs["Geometry"], reveal.inputs["Geometry"])
+    h.lk(unborn.outputs["Result"], reveal.inputs["Selection"])
+
+    # A_BREAK_F is always written by the bake, BAKE_NEVER for an edge that
+    # held. It has to be: a missing named attribute reads 0, and every edge
+    # would then test as torn on frame 1 and the whole web would vanish.
+    brkf = h.named('FLOAT', A_BREAK_F, 460, -300)
+    torn = h.cmp('FLOAT', 'LESS_EQUAL', 610, -300,
+                 brkf.outputs["Attribute"], stime.outputs["Frame"],
+                 label="torn by now")
+    de = h.n("GeometryNodeDeleteGeometry", 640, 0, label="broken edges",
+             domain='EDGE', mode='EDGE_FACE')
+    h.lk(reveal.outputs["Geometry"], de.inputs["Geometry"])
+    h.lk(torn.outputs["Result"], de.inputs["Selection"])
+
+    eov = h.n("GeometryNodeEdgesOfVertex", 640, -460)
+    orphan = h.cmp('INT', 'EQUAL', 790, -460, eov.outputs["Total"], 0)
+    dp = h.n("GeometryNodeDeleteGeometry", 790, 0, label="orphans",
+             domain='POINT')
+    h.lk(de.outputs["Geometry"], dp.inputs["Geometry"])
+    h.lk(orphan.outputs["Result"], dp.inputs["Selection"])
+
+    h.lk(dp.outputs["Geometry"], go.inputs["Geometry"])
+    return nt
+
+
+def _ensure_bake_group():
+    nt = bpy.data.node_groups.get(GROUP_BAKE_APPLY)
+    if nt is not None:
+        if nt.get("swf_version", 0) >= BAKE_APPLY_VERSION:
+            return nt
+        nt.name = GROUP_BAKE_APPLY + ".old"
+    nt = _build_bake_group()
+    nt["swf_version"] = BAKE_APPLY_VERSION
+    return nt
+
+
+def bake_cache(obj):
+    """The cache object of `obj`'s bake, or None if it is not baked.
+
+    The object is the record, not the property: deleting the cache in the
+    outliner is a legitimate way to throw a bake away, and the panel should
+    say "not baked" straight afterwards rather than offer to free nothing."""
+    name = obj.get(P_BAKE_CACHE) if obj is not None else None
+    return bpy.data.objects.get(name) if name else None
+
+
+def bake_range(obj):
+    """(first, last) baked frame, or None when there is no bake."""
+    if bake_cache(obj) is None:
+        return None
+    try:
+        return int(obj[P_BAKE_START]), int(obj[P_BAKE_END])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def apply_modifier(obj):
     """The object's Arachne GPU Apply modifier, or None. Its viewport
     toggle is what decides whether you are looking at the simulation or at
@@ -503,17 +658,20 @@ def enable_gpu_solver(context, obj, collider=None):
     me.attributes[A_GPU_POS].data.foreach_set("vector", co)
     me.update_tag()
 
-    if not any(m.type == 'NODES' and m.node_group
-               and m.node_group.name.startswith(GROUP_GPU_APPLY)
-               for m in obj.modifiers):
+    mod = apply_modifier(obj)
+    if mod is None:
         mod = obj.modifiers.new("Arachne GPU Apply", 'NODES')
-        mod.node_group = _ensure_apply_group()
         try:  # apply modifier must precede strandify
             with context.temp_override(object=obj):
                 bpy.ops.object.modifier_move_to_index(
                     modifier=mod.name, index=0)
         except RuntimeError:
             pass
+    # a baked web is asking to go live again: the bake group plays the cache
+    # back and ignores the solver entirely, so re-enabling the solver under
+    # it would simulate into a mesh nothing reads
+    if mod.node_group is None or mod.node_group.name != GROUP_GPU_APPLY:
+        mod.node_group = _ensure_apply_group()
 
     g = obj.swf_gpu
     if me.attributes.get(A_SHOT) is not None:
@@ -813,8 +971,194 @@ class ARN_OT_pin_vertices(Operator):
         return {'FINISHED'}
 
 
+class ARN_OT_bake_web(Operator):
+    """Bake the web sim into the .blend so renders, Alembic/USD exports and
+    reopened files all replay it without the solver running.
+
+    The live solver only exists while frame-change handlers run on the main
+    thread with a GPU context — true in the viewport and nowhere else. This
+    plays the scene frame range once here, stores the result, and switches
+    the apply modifier over to pure Geometry Nodes playback of it"""
+    bl_idname = "arachne.bake_web"
+    bl_label = "Bake Web for Render"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.object
+        return (obj is not None and obj.type == 'MESH'
+                and getattr(obj, "swf_gpu", None) is not None
+                and obj.swf_gpu.enabled)
+
+    def execute(self, context):
+        global _BAKING
+        if not gpu_backend_available():
+            self.report({'ERROR'}, backend_reason())
+            return {'CANCELLED'}
+        scene = context.scene
+        obj = context.object
+        me = obj.data
+        n, m = len(me.vertices), len(me.edges)
+        start, end = scene.frame_start, scene.frame_end
+        frames = end - start + 1
+        if frames < 1 or n == 0:
+            self.report({'ERROR'},
+                        "Nothing to bake: empty frame range or empty mesh.")
+            return {'CANCELLED'}
+
+        pos_all = np.empty(frames * n * 3, np.float32)
+        tens_all = np.empty(frames * n, np.float32)
+        # one frame number per edge instead of a per-frame broken mask: the
+        # tear kernel skips any edge already torn, so tearing is one-way
+        breakf = np.full(m, BAKE_NEVER, np.float32)
+
+        restore = scene.frame_current
+        _drop_state(obj.name)          # bake from a clean bind, not mid-run
+        wm = context.window_manager
+        wm.progress_begin(0, frames)
+        _BAKING = True
+        try:
+            for i, f in enumerate(range(start, end + 1)):
+                # fires frame_change_post, which is what steps the solver.
+                # Consecutive frames from frame_start, so _on_frame takes its
+                # reset-then-step path exactly as viewport playback would
+                scene.frame_set(f)
+                wm.progress_update(i)
+                entry = _CACHE.get(obj.name, {}).get(f)
+                if entry is None:
+                    self.report({'ERROR'},
+                                "Solver produced nothing at frame %d — %s"
+                                % (f, backend_reason() or "see the console"))
+                    return {'CANCELLED'}
+                pos, brk, tens = entry
+                if pos.size != n * 3 or brk.size != m:
+                    self.report({'ERROR'},
+                                "The web was rebuilt mid-bake at frame %d."
+                                % f)
+                    return {'CANCELLED'}
+                pos_all[i * n * 3:(i + 1) * n * 3] = pos
+                tens_all[i * n:(i + 1) * n] = tens
+                fresh = brk & (breakf > BAKE_NEVER * 0.5)
+                breakf[fresh] = f
+        finally:
+            _BAKING = False
+            wm.progress_end()
+            scene.frame_set(restore)
+
+        cache = _write_cache(context, obj, pos_all, tens_all, frames, n)
+        _ensure_attr(me, A_BREAK_F, 'FLOAT', 'EDGE')
+        me.attributes[A_BREAK_F].data.foreach_set("value", breakf)
+
+        grp = _ensure_bake_group()
+        mod = apply_modifier(obj)
+        if mod is None:
+            mod = obj.modifiers.new(GROUP_BAKE_APPLY, 'NODES')
+            try:                      # apply modifier must precede strandify
+                with context.temp_override(object=obj):
+                    bpy.ops.object.modifier_move_to_index(
+                        modifier=mod.name, index=0)
+            except RuntimeError:
+                pass
+        mod.node_group = grp
+        mod.show_viewport = True
+        set_modifier_input(mod, grp, "Cache", cache)
+        set_modifier_input(mod, grp, "Start", start)
+        set_modifier_input(mod, grp, "End", end)
+        set_modifier_input(mod, grp, "Verts", n)
+
+        obj[P_BAKE_CACHE] = cache.name
+        obj[P_BAKE_START] = start
+        obj[P_BAKE_END] = end
+        # the solver has nothing left to do, and leaving it on would mean the
+        # handler carrying on rewriting a mesh nothing reads any more — which
+        # is the write that crashes renders in the first place
+        obj.swf_gpu.enabled = False
+        _drop_state(obj.name)
+        me.update_tag()
+
+        mb = (frames * n * 16) / (1024.0 * 1024.0)
+        self.report({'INFO'},
+                    "Baked frames %d-%d (%.1f MB). Renders, Alembic/USD "
+                    "and reopened files replay it now." % (start, end, mb))
+        return {'FINISHED'}
+
+
+def _write_cache(context, obj, pos_all, tens_all, frames, n):
+    """Store a bake as a mesh of frames x n loose vertices.
+
+    Loose vertices are not renderable geometry, so the cache object costs
+    nothing in a render even though it has to stay visible to the depsgraph
+    for the Object Info node to read it."""
+    name = BAKE_CACHE % obj.name
+    old = bpy.data.objects.get(name)
+    if old is not None:               # re-bake replaces the previous one
+        old_me = old.data
+        bpy.data.objects.remove(old)
+        if getattr(old_me, "users", 0) == 0:
+            bpy.data.meshes.remove(old_me)
+
+    me = bpy.data.meshes.new(name)
+    me.vertices.add(frames * n)
+    me.vertices.foreach_set("co", pos_all)
+    me.attributes.new(A_TENSION, 'FLOAT', 'POINT')
+    me.attributes[A_TENSION].data.foreach_set("value", tens_all)
+    me.update()
+
+    cache = bpy.data.objects.new(name, me)
+    context.scene.collection.objects.link(cache)
+    cache.hide_select = True
+    cache.hide_render = True
+    # NOT hide_viewport: the monitor icon drops an object out of the
+    # depsgraph, and Object Info would then read empty geometry and collapse
+    # the web onto its origin. The eye icon is display-only and safe.
+    try:
+        cache.hide_set(True)
+    except RuntimeError:
+        pass
+    return cache
+
+
+class ARN_OT_free_web_bake(Operator):
+    """Delete the bake and hand the web back to the live GPU solver"""
+    bl_idname = "arachne.free_web_bake"
+    bl_label = "Free Web Bake"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return bake_cache(context.object) is not None
+
+    def execute(self, context):
+        obj = context.object
+        cache = bake_cache(obj)
+        if cache is not None:
+            cme = cache.data
+            bpy.data.objects.remove(cache)
+            if getattr(cme, "users", 0) == 0:
+                bpy.data.meshes.remove(cme)
+        for key in (P_BAKE_CACHE, P_BAKE_START, P_BAKE_END):
+            obj.pop(key, None)
+
+        me = obj.data
+        brk = me.attributes.get(A_BREAK_F)
+        if brk is not None:
+            me.attributes.remove(brk)
+
+        mod = apply_modifier(obj)
+        if mod is not None:
+            mod.node_group = _ensure_apply_group()
+        obj.swf_gpu.enabled = True
+        _drop_state(obj.name)
+        me.update_tag()
+        self.report({'INFO'},
+                    "Bake freed, solver live again — play from frame %d."
+                    % context.scene.frame_start)
+        return {'FINISHED'}
+
+
 classes = (ARN_GPUProps, ARN_OT_add_gpu_solver, ARN_OT_setup_pull,
-           ARN_OT_remove_gpu_solver, ARN_OT_reset_gpu, ARN_OT_pin_vertices)
+           ARN_OT_remove_gpu_solver, ARN_OT_reset_gpu, ARN_OT_pin_vertices,
+           ARN_OT_bake_web, ARN_OT_free_web_bake)
 
 
 def _safe_register(cls):

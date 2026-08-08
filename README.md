@@ -127,7 +127,8 @@ Built on Blender's native GPU module, nothing to install.
   Hit **Set Up Rigid Body Pull** once, then play from frame 1 see
   [Tips](#tips).
 - **Deteriorate** (pre-broken threads), **Pre-warm** (starts settled)
-- Render-safe frame cache. see [Rendering](#rendering)
+- **Bake Web for Render** — stores the sim in the .blend, so renders
+  and Alembic/USD exports replay it. see [Rendering](#rendering)
 
 ## Rendering
 
@@ -145,10 +146,26 @@ strands, condense and grow, slide under the silk, then drip off and
 free-fall once heavy enough, respawning at their birth spot. Droplets on
 torn strands are flung off.
 
-**Before rendering animations**, play the frame range through once in the
-viewport, then hit **Bake Dew for Render**. GPU compute can't run on the
-render thread, so the solver replays a viewport cache; the dew sim needs
-its own disk bake. The bake fills both.
+**Before rendering or exporting an animation**, hit **Bake Web for Render**
+in the GPU Solver panel (and **Bake Dew for Render** below, if dew is on).
+The web bake plays the scene frame range once here, stores the result in the
+.blend, and switches the apply modifier over to a pure Geometry Nodes
+playback of it. Nothing is left for a frame handler to do, so the web is
+correct on the render thread, inside Alembic and USD exports, on a render
+farm, and after the file is closed and reopened. **Free** hands it back to
+the live solver.
+
+Without a bake the solver only exists during viewport playback. A render
+replays whatever the viewport cache happens to hold and drops the rest, and
+Alembic and USD step frames through their own loop that never fires
+frame-change handlers at all so they write one frozen pose onto every
+frame, with the web ignoring the emitter it was fired from.
+
+A bake costs about `frames x vertices x 16` bytes in the .blend: 0.2 MB for
+a 1000-vertex web over 12 frames, ~20 MB over 250. Torn threads cost one
+number per edge however long the bake runs, because a thread never
+un-tears. Re-bake after moving the scene frame range the panel says so
+when the range has drifted outside what was baked.
 
 ## Tips
 
@@ -191,9 +208,8 @@ its own disk bake. The bake fills both.
 
 ## Limitations
 
-- The solver runs during viewport playback and UI renders. For
-  command-line / farm rendering, play through once and export the animated
-  web (e.g. Alembic) first.
+- The live solver only runs during viewport playback. Bake Web for Render
+  before rendering, exporting or handing the file to a farm.
 - No self-collision between threads.
 - SDF collision approximates rigid colliders; deforming meshes fall back to
   the bounded shape at bake time.

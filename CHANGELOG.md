@@ -1,5 +1,50 @@
 # Changelog
 
+## 4.4.0
+
+**Bake Web for Render.** The web sim can be stored in the .blend and played
+back by Geometry Nodes alone. One feature, three reported bugs, one cause:
+the solver only ever existed as frame-handler writes into the mesh, so
+anything that does not fire frame-change handlers on the main thread with a
+live GPU context saw nothing.
+
+- **Renders no longer crash with the apply modifier in the stack.** During a
+  render the frame handler runs on the render thread, rewrote mesh
+  attributes and re-tagged the mesh while the render job was reading the
+  same evaluated geometry. That only became a crash when something consumed
+  those attributes — i.e. only with Arachne GPU Apply present, which is why
+  removing it appeared to fix it and took the web with it. A baked web
+  switches the solver off, so no handler touches the mesh during a render.
+- **Alembic and USD export the animation.** Both step frames through their
+  own loop and never fire frame-change handlers, so the solver never
+  advanced and every frame got whatever pose was in the mesh when the export
+  started — one static web that ignored its emitter. Geometry Nodes is
+  evaluated by the depsgraph, which exporters do update, so a baked web
+  animates through them.
+- **A bake survives saving.** The previous "render-safe frame cache" was a
+  Python dict in memory: never written to the .blend, gone on reload, and
+  nothing in the add-on wrote the web to disk (Bake Dew for Render only ever
+  covered the dew droplets). The bake is a real datablock.
+
+Details:
+
+- **Bake Web for Render / Free** in the GPU Solver panel. Baking plays the
+  scene frame range once, writes positions and tension into a cache mesh of
+  frames x vertices loose vertices, and points the apply modifier at
+  **Arachne GPU Apply Bake**, which samples the row for the current frame.
+  Loose vertices are not renderable geometry, so the cache costs nothing in
+  a render. Held, not wrapped, outside the baked range.
+- **Torn threads cost one number per edge, not one per edge per frame.** The
+  tear kernel skips any edge already torn, so tearing is one-way: the frame
+  each thread broke on (`swf_break_f`) is the whole story, and the baked
+  group deletes an edge once the timeline passes it. A bake is about
+  `frames x vertices x 16` bytes — 0.2 MB for a 1000-vertex web over 12
+  frames.
+- The panel warns when the scene frame range has moved outside the bake.
+- The render-time console warning now fires only for a web still on the live
+  solver, and points at the bake instead of at filling a viewport cache.
+
+
 ## 4.3.2
 
 - **Solver no longer dies on the OpenGL backend.** The shared uniform push

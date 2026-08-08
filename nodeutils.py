@@ -68,6 +68,16 @@ class H:
         self._feed(node.inputs["Scale"], scale)
         return node
 
+    def imath(self, op, x, y, a=None, b=None, c=None, label=""):
+        """Integer Math node. Exact where float math is not: a bake index is
+        frame * vertex_count + index, which passes 2**24 on a long bake of a
+        dense web and would start rounding to the wrong vertex."""
+        node = self.n("FunctionNodeIntegerMath", x, y, label=label,
+                      operation=op)
+        for sock, v in zip(node.inputs, (a, b, c)):
+            self._feed(sock, v)
+        return node
+
     def cmp(self, dtype, op, x, y, a=None, b=None, label=""):
         node = self.n("FunctionNodeCompare", x, y, label=label,
                       data_type=dtype, operation=op)

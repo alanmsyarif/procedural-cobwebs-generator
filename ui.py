@@ -451,6 +451,34 @@ class ARN_PT_main(Panel):
             row = col.row(align=True)
             row.operator("arachne.reset_gpu", icon='FILE_REFRESH')
             row.operator("arachne.remove_gpu_solver", text="Remove", icon='X')
+        # Bake. Drawn outside the `enabled` block on purpose: baking switches
+        # the solver off, so the state that needs a Free button is exactly the
+        # state where none of the settings above are on screen.
+        from .gpu_solver import bake_range
+        rng = bake_range(obj) if obj and obj.type == 'MESH' else None
+        if rng is not None or (obj and obj.type == 'MESH'
+                               and obj.swf_gpu.enabled):
+            scene = context.scene
+            col.separator()
+            if rng is None:
+                col.operator("arachne.bake_web", icon='RENDER_ANIMATION')
+                col.label(text="Bake before rendering or exporting.",
+                          icon='INFO')
+            else:
+                row = col.row(align=True)
+                row.operator("arachne.bake_web", text="Re-bake",
+                             icon='FILE_REFRESH')
+                row.operator("arachne.free_web_bake", text="Free", icon='X')
+                col.label(text="Baked %d-%d, playing from the cache." % rng,
+                          icon='CHECKMARK')
+                # the bake holds its end pose outside its own range, so a
+                # scene range that has since grown renders a frozen web over
+                # the frames past the end rather than an obviously empty one
+                if scene.frame_start < rng[0] or scene.frame_end > rng[1]:
+                    col.label(text="Scene range %d-%d is outside it."
+                                   % (scene.frame_start, scene.frame_end),
+                              icon='ERROR')
+                    col.label(text="Re-bake to cover it.", icon='BLANK1')
         col.separator()
         col.label(text="Anchors (Edit Mode):")
         row = col.row(align=True)
